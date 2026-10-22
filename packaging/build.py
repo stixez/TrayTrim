@@ -4,7 +4,8 @@
     python packaging/build.py              # dist/TrayTrim/ and dist/TrayTrim-<version>-setup.exe
     python packaging/build.py --no-installer
 
-The installer needs Inno Setup 6 (ISCC.exe on PATH, in its default folder, or in $ISCC).
+On macOS the app is dist/TrayTrim.app, on Linux dist/TrayTrim/TrayTrim. CI builds all three
+(.github/workflows/release.yml). The installer needs Inno Setup 6 (ISCC.exe on PATH, in its default folder, or in $ISCC).
 """
 
 from __future__ import annotations
@@ -73,7 +74,9 @@ def build_app() -> Path:
         args += ["--icon", str(PACKAGING / "assets" / "TrayTrim.ico"),
                  "--version-file", str(version_file(work / "version_info.txt"))]
     elif sys.platform == "darwin":
-        args += ["--icon", str(PACKAGING / "assets" / "TrayTrim-1024.png")]
+        # PyInstaller turns the PNG into an .icns (with Pillow) and makes TrayTrim.app.
+        args += ["--icon", str(PACKAGING / "assets" / "TrayTrim-1024.png"),
+                 "--osx-bundle-identifier", "io.github.stixez.traytrim"]
     for module in EXCLUDE:
         args += ["--exclude-module", module]
     PyInstaller.__main__.run(args)
