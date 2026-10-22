@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gc
 import os
 import sys
 from importlib import resources
@@ -11,7 +12,7 @@ from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import QApplication
 
-from traytrim.gui import theme
+from traytrim.gui import icons, tasks, theme
 from traytrim.gui.main_window import MainWindow
 from traytrim.settings import THEMES, Settings
 
@@ -85,4 +86,15 @@ def run(theme_override: str | None = None) -> int:
     if os.environ.get("TRAYTRIM_SMOKE_TEST"):
         # Packaging check: build the window, then quit cleanly (exit code 0).
         QTimer.singleShot(3000, app.quit)
-    return app.exec()
+    code = app.exec()
+    # Tear down in order while Qt is still alive: stop and wait for background work, delete
+    # the window, drop cached images. Left to Python's shutdown, Qt objects can be destroyed
+    # after the application object, which crashes the process on exit.
+    window.stop_work()
+    tasks.shutdown()
+    window.deleteLater()
+    del window
+    icons.image.cache_clear()
+    app.sendPostedEvents(None, 0)  # runs the deleteLater
+    gc.collect()
+    return code

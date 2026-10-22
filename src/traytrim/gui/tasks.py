@@ -71,6 +71,17 @@ class BackgroundTask(QObject):
             _live.discard(self)
 
 
+def shutdown(timeout_ms: int = 15_000) -> bool:
+    """Before the app exits: ask every running task to stop and wait for the worker threads,
+    so none is still running Python or sending signals while Qt and Python shut down (that
+    crashes the process on exit). True if they all finished in time."""
+    with _live_lock:
+        tasks = list(_live)
+    for task in tasks:
+        task.cancel()
+    return QThreadPool.globalInstance().waitForDone(timeout_ms)
+
+
 def _emit(signal, *value) -> None:
     try:
         signal.emit(*value)

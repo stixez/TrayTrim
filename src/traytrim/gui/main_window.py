@@ -674,12 +674,18 @@ class MainWindow(QMainWindow):
             self._check_index_ready()
             QTimer.singleShot(0, self._refresh_index)  # after the first paint
 
-    def closeEvent(self, event) -> None:  # noqa: N802
-        # Don't wait: the index task stops at its next check and SQLite rolls back anything
-        # unfinished, so the next start simply resumes.
+    def stop_work(self) -> None:
+        """Ask the background work to stop: the index refresh stops at its next check (SQLite
+        rolls back anything unfinished, so the next start resumes), plans and name reading
+        stop. The app waits for the threads before it exits (tasks.shutdown)."""
         self.index.stop()
         if self._plan_task is not None:
             self._plan_task.cancel()
+        if self._names_cancel is not None:
+            self._names_cancel.set()
+
+    def closeEvent(self, event) -> None:  # noqa: N802
+        self.stop_work()
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         try:
             self.settings.save()
