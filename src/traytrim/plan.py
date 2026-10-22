@@ -27,7 +27,8 @@ from typing import Callable, Iterator
 from traytrim import dbpf, restypes
 from traytrim.dbpf import ResourceKey
 from traytrim.index import ModsHit, ResourceIndex
-from traytrim.references import LEAF_TYPES, ReferenceError_, references
+from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, LEAF_TYPES, ReferenceError_,
+                                 large_values, references)
 from traytrim.resolve import LocatedRef, Where
 from traytrim.tray import TrayRef
 
@@ -103,7 +104,7 @@ class Plan:
 class _Packages:
     """Open packages, a few at a time, plus each package's keys by instance."""
 
-    def __init__(self, limit: int = 24):
+    def __init__(self, limit: int = 256):
         self._open: OrderedDict[Path, dbpf.Package] = OrderedDict()
         self._keys: dict[Path, dict[int, list[ResourceKey]]] = {}
         self._limit = limit
@@ -222,11 +223,22 @@ def build_plan(refs: list[LocatedRef], index: ResourceIndex,
                 continue
             for r in found:
                 queue.append((r.key, owner, key, r.how))
+            if key.type in CROSS_SCAN_TYPES:
+                own = packages.keys(item.copy.path)
+                for k in index.mods_keys_for_instances(large_values(data), ASSET_TYPES):
+                    if k not in own.get(k.instance, ()):
+                        queue.append((k, owner, key, "scan"))
             if key.type == restypes.CASP:
                 # CAS shows the part's thumbnail; it's in the package but not in the key list.
                 for k in packages.keys(item.copy.path).get(key.instance, []):
                     if k.type == restypes.THUM:
                         queue.append((k, owner, key, "thumbnail"))
+            elif key.type == restypes.OBJECT_DEFINITION and via == "tray":
+                # An object is its definition plus everything with the same id in its package:
+                # catalog entry, thumbnails, its sim data.
+                for k in packages.keys(item.copy.path).get(key.instance, []):
+                    if k != key:
+                        queue.append((k, owner, key, "object"))
     finally:
         packages.close()
     plan.whole_size = plan.whole_packages_size()

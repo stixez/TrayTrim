@@ -5,7 +5,7 @@
 <h1 align="center">TrayTrim</h1>
 
 <p align="center">
-  Export a Sims 4 household with only the custom content its Sims actually use.<br>
+  Export a Sims 4 household, lot or room with only the custom content it actually uses.<br>
   One small package, checked file by file, instead of gigabytes of whole packages.
 </p>
 
@@ -20,14 +20,18 @@ uses. With merged packages that adds up fast: one lipstick from a 1 GB merge bri
 gigabyte along. On a real Mods folder with 4,500 packages, one single-Sim household came to
 4.96 GB that way. TrayTrim exported the same Sim in 30.5 MB.
 
-TrayTrim reads the tray files, works out exactly which resources the Sims need (CAS parts, meshes,
-textures, thumbnails, sliders, sculpts, skin tones), copies just those out of whatever packages
-they live in, writes them into one package next to the tray files, and checks the result.
+TrayTrim reads the tray files, works out exactly which resources are needed (for Sims: CAS
+parts, meshes, textures, thumbnails, sliders, sculpts, skin tones; for lots and rooms: objects,
+their models and textures, walls, floors and other build items), copies just those out of whatever
+packages they live in, writes them into one package next to the tray files, and checks the result.
 
 ## What it does
 
 - **Finds every CC item** the Sims wear, in every outfit, plus genetics, sliders, sculpts and skin
   tone, straight from the tray files.
+- **Does lots and rooms too**: every placed object and every wall, floor, fence or other build
+  item. Mods that only change EA objects (unlocks, tuning) are left out unless you include them,
+  so an export doesn't change the recipient's game.
 - **Follows every file the CC needs**: meshes, textures in any format, thumbnails, slider shapes,
   across packages, so recolors that need a separate mesh still work.
 - **Takes the copy the game uses** when the same file is in your Mods more than once with
@@ -87,6 +91,9 @@ the test folder holds nothing but the two test files.
 into `Game/Bin/Python/generated.zip`), and the outfit and body type enums come from the game's Python
 code; [`tray.py`](src/traytrim/tray.py) lists every field used. The small headers around the
 messages were worked out from real files and checked against every household in a real Tray folder.
+Lot and room files are snappy-compressed; their layout follows
+[Harbor](https://github.com/Harborofficial/Harbor)'s description and was checked on every lot and
+room in a real Tray folder.
 
 **The index** of your Mods and of the game (base game, packs and their Delta updates) lives in
 TrayTrim's cache folder. Only packages that changed are read again, so after the first build (about
@@ -95,8 +102,9 @@ a minute for a large Mods folder) a refresh takes about a second. Packages deepe
 
 **Dependencies:** a CAS part's key list and a mesh's texture list are read directly (their layout
 was checked on thousands of real resources). Sliders, sculpts and other small resources are scanned
-for the ids of resources in their own package. Textures are matched across texture formats, the
-way the game resolves them.
+for the ids of resources in their own package; object definitions and models are also matched
+against models and textures in other packages, so a recolor finds its mesh. Textures are matched
+across texture formats, the way the game resolves them.
 
 **One assumption the game doesn't document:** when two Mods packages hold the same resource, the
 game uses the one that loads last, and packages load in alphabetical order of their path in Mods.
@@ -107,7 +115,7 @@ Conflict notices say so.
 - Changes that affect every Sim and aren't referenced from the tray files can't be found: default
   replacements of skin, eyes or bodies that the Sims don't wear directly, and script mods. The
   recipient needs those separately.
-- Lots and rooms aren't supported yet, only households.
+- Sims living on a lot aren't part of a lot export; export their household on its own.
 - CC names (string tables) aren't exported; CAS shows the items without them.
 - Many CC creators don't allow re-uploading their work. Exports are meant for your own backups and
   transfers, or for CC you have the rights to share.
@@ -118,7 +126,7 @@ Everything the app does is also available from a terminal:
 
 ```
 traytrim                    # open the app
-traytrim tray list          # households in your Tray folder
+traytrim tray list --all    # households, lots and rooms in your Tray folder
 traytrim tray show "Camille" --plan
 traytrim export "Camille" --out ./exports
 traytrim index              # build or refresh the index
@@ -161,7 +169,9 @@ TrayTrim is released under the [MIT License](LICENSE).
 It uses [PySide6](https://doc.qt.io/qtforpython/) (Qt for Python, LGPL) and bundles the
 [IBM Plex](https://github.com/IBM/plex) fonts (SIL Open Font License, see
 `src/traytrim/gui/assets/fonts/OFL.txt`). Resource type ids were cross-checked with
-[Sims 4 Toolkit](https://github.com/sims4toolkit).
+[Sims 4 Toolkit](https://github.com/sims4toolkit), s4pi-reforged and TS4Tools; the lot and room
+layouts come from [Harbor](https://github.com/Harborofficial/Harbor) (MIT). The snappy decoder is
+written from Google's [format description](https://github.com/google/snappy).
 
 TrayTrim is a fan-made tool and isn't affiliated with or endorsed by Electronic Arts or Maxis. The
 Sims is a trademark of Electronic Arts Inc.

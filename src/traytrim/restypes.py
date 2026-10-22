@@ -23,6 +23,30 @@ DEFORMER_MAP = 0xDB43E069  # slider shape data. community name; found by scannin
 BONE_DELTA = 0x0355E0A6    # observed sharing instances with sim modifiers
 BLEND_GEOMETRY = 0x067CAA11  # observed sharing instances with modifiers and sculpts; verify too
 
+# Build/buy. ObjectDefinition and ObjectCatalog: s4tk, and observed: every object placed on a
+# real lot has exactly one of each with its definition id as instance. Object thumbnails:
+# observed next to them (JPEG). Model, ModelLod, Light, Slot, Rig: s4tk.
+OBJECT_DEFINITION = 0xC0DB5AE7
+OBJECT_CATALOG = 0x319E4F1D
+OBJECT_THUMB = 0x3C2A8647
+MODEL = 0x01661233
+MODEL_LOD = 0x01D10F34
+LIGHT = 0x03B4C61D
+SLOT = 0xD3044521
+RIG = 0x8EAF13DE
+
+# Build catalog entries a lot or room lists. Names only where s4pi-reforged and TS4Tools agree
+# (and walls and floors are by far the most common keys on real lots); the other build types
+# those tools name differently stay unnamed. Each has an OBJECT_THUMB with the same instance
+# (observed).
+WALL = 0xD5F0F921
+FLOOR = 0xB4F762C9
+FENCE = 0x0418FE2A
+FOUNDATION = 0x2FAE983E
+RAILING = 0x1C1CF1F7
+BUILD_NAMES = {WALL: "Wall", FLOOR: "Floor", FENCE: "Fence", FOUNDATION: "Foundation",
+               RAILING: "Railing"}
+
 # Texture formats. A reference to a texture is resolved by instance across these: real meshes
 # and CAS parts refer to e.g. a DST texture that's stored as RLE2 (seen on hundreds of keys).
 TEXTURE_TYPES = {RLE2, RLES, DST, LRLE}
@@ -30,9 +54,13 @@ TEXTURE_TYPES = {RLE2, RLES, DST, LRLE}
 NAMES = {
     CASP: "CAS part", GEOM: "Mesh", RLE2: "Texture", RLES: "Texture", DST: "Texture",
     LRLE: "Texture", DEFORMER_MAP: "Deformer map",
+    OBJECT_DEFINITION: "Object definition", OBJECT_CATALOG: "Object catalog",
+    OBJECT_THUMB: "Thumbnail", MODEL: "Model", MODEL_LOD: "Model LOD", LIGHT: "Light",
+    SLOT: "Slot", RIG: "Rig",
     THUM: "Thumbnail", REGION_MAP: "Region map", CAS_PRESET: "CAS preset",
     STRING_TABLE: "String table", SIM_MODIFIER: "Slider", SCULPT: "Sculpt",
     SKIN_TONE: "Skin tone", BONE_DELTA: "Bone delta", BLEND_GEOMETRY: "Blend geometry",
+    **BUILD_NAMES,
 }
 
 

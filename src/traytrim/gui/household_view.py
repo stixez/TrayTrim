@@ -25,13 +25,16 @@ from traytrim.units import human_size, percent_smaller
 CARD_WIDTH = 140
 THUMB = 124
 
-# Section order, as CAS shows things.
+# Section order, as CAS shows things; a lot or room has objects and build items.
 GROUP_ORDER = ["Hair", "Clothing", "Accessories", "Makeup", "Eyes", "Skin details", "Body",
                "Other CAS parts", "Skin tone", "Sculpts", "Sliders", "Custom tattoos",
-               "Pet coat"]
+               "Pet coat", "Objects", "Build"]
 KIND_LABEL = {RefKind.SCULPT: "Sculpt", RefKind.SIM_MODIFIER: "Slider",
               RefKind.SKIN_TONE: "Skin tone", RefKind.PELT_LAYER: "Coat layer",
-              RefKind.CUSTOM_TATTOO: "Custom tattoo"}
+              RefKind.CUSTOM_TATTOO: "Custom tattoo", RefKind.OBJECT: "Object"}
+# Kinds with a thumbnail in their package, and its resource type.
+THUMB_TYPES = {RefKind.CAS_PART: restypes.THUM, RefKind.OBJECT: restypes.OBJECT_THUMB,
+               RefKind.BUILD: restypes.OBJECT_THUMB}
 
 
 @dataclass
@@ -41,12 +44,43 @@ class HouseholdReport:
     refs: list[LocatedRef]
     sim_ids: set[int]
     excluded: set[TrayRef] = field(default_factory=set)
+    overrides: set[TrayRef] = field(default_factory=set)  # left out unless the user opts in
+
+    @property
+    def noun(self) -> str:
+        return self.contents.kind  # "household", "lot" or "room"
 
 
 def item_label(ref: LocatedRef) -> str:
     if ref.ref.kind is RefKind.CAS_PART:
         return tray.BODY_TYPES.get(ref.ref.body_type, "CAS part")
+    if ref.ref.kind is RefKind.BUILD:
+        if ref.ref.type_id in restypes.BUILD_NAMES:
+            return restypes.BUILD_NAMES[ref.ref.type_id]
+        return "Model" if ref.ref.type_id == restypes.MODEL else "Build item"
     return KIND_LABEL.get(ref.ref.kind, ref.ref.kind.value)
+
+
+def item_subtitle(item: TrayItem, with_price: bool = False) -> str:
+    """"40 × 30 · 2 bedrooms · 1 bathroom" for a lot, "6 × 4" for a room."""
+    parts = []
+    if item.size and all(item.size):
+        parts.append(f"{item.size[0]} × {item.size[1]}")
+    if with_price and item.price:
+        parts.append(f"§{item.price:,}")
+    if item.bedrooms:
+        parts.append(plural(item.bedrooms, "bedroom"))
+    if item.bathrooms:
+        parts.append(plural(item.bathrooms, "bathroom"))
+    return " · ".join(parts)
+
+
+def card_caption(ref: LocatedRef) -> str:
+    """The small line above the package name. Every card in the Objects section is an object,
+    so there it says how often it's placed instead."""
+    if ref.ref.kind is RefKind.OBJECT and ref.usage:
+        return summarize_uses(set().union(*ref.usage.values()))
+    return item_label(ref)
 
 
 def package_name(ref: LocatedRef) -> str:
@@ -78,7 +112,8 @@ _CLOTHING_ICONS = {6: "cat-top", 7: "cat-bottom", 5: "cat-dress", 8: "cat-shoes"
 _GROUP_ICONS = {"Hair": "cat-hair", "Accessories": "cat-accessory", "Makeup": "cat-makeup",
                 "Eyes": "cat-eyes", "Skin details": "cat-skin-detail", "Body": "cat-body",
                 "Sliders": "cat-slider", "Sculpts": "cat-sculpt", "Skin tone": "cat-skin-tone",
-                "Custom tattoos": "cat-skin-detail", "Pet coat": "cat-skin-tone"}
+                "Custom tattoos": "cat-skin-detail", "Pet coat": "cat-skin-tone",
+                "Objects": "cat-object", "Build": "cat-build"}
 
 
 def category_icon(ref: LocatedRef) -> str:
@@ -237,11 +272,11 @@ class CcCard(QFrame):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(SPACE["xs"])
         outer.addWidget(self.body)
-        # CAS parts wait for their thumbnail; other kinds never have one.
-        self.thumb = Thumbnail(THUMB, category_icon(ref), ref.ref.kind is RefKind.CAS_PART)
+        # Kinds with a thumbnail wait for it; the others never have one.
+        self.thumb = Thumbnail(THUMB, category_icon(ref), ref.ref.kind in THUMB_TYPES)
         col.addWidget(self.thumb)
         col.addSpacing(SPACE["xs"])
-        col.addWidget(label(item_label(ref), "caption"))
+        col.addWidget(label(card_caption(ref), "caption"))
         col.addWidget(ClampedText(package_name(ref), 2))
         foot = QHBoxLayout()
         foot.setContentsMargins(0, SPACE["xs"], 0, 0)
@@ -397,8 +432,11 @@ class Hero(QWidget):
     """The one number that matters: how big the export is, next to whole packages, and the
     one action: Export."""
 
-    def __init__(self, on_export, parent=None):
+    def __init__(self, on_export, noun: str = "household", parent=None):
         super().__init__(parent)
+        self._noun = noun
+        self._following = ("meshes, textures and sliders" if noun == "household"
+                           else "models and textures")
         col = QVBoxLayout(self)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(SPACE["xs"])
@@ -439,11 +477,11 @@ class Hero(QWidget):
         if total:
             self.bar.setRange(0, total)
             self.bar.setValue(done)
-            self.line.setText(f"Following meshes, textures and sliders: {done:,} of "
-                              f"{total:,} files so far.")
+            self.line.setText(f"Following {self._following}: {done:,} of {total:,} files "
+                              "so far.")
         else:
             self.bar.setRange(0, 0)
-            self.line.setText("Following meshes, textures and sliders.")
+            self.line.setText(f"Following {self._following}.")
         self.bar.show()
 
     def show_error(self, reason: str, on_retry) -> None:
@@ -472,7 +510,7 @@ class Hero(QWidget):
         if not plan.resources:
             self.number.setText("Nothing to export")
             self.saving.setText("")
-            self.line.setText("Every CC item is left out, or the household only uses game "
+            self.line.setText(f"Every CC item is left out, or the {self._noun} only uses game "
                               "content.")
             return
         size, whole = plan.export_size, plan.whole_size
@@ -577,8 +615,8 @@ class HouseholdView(QWidget):
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.stack.addWidget(self.scroll)
-        self.show_message("No household selected",
-                          "Pick a household on the left to see which CC it uses.")
+        self.show_message("Nothing selected",
+                          "Pick a household, lot or room on the left to see which CC it uses.")
 
     # States
 
@@ -668,7 +706,7 @@ class HouseholdView(QWidget):
                     card.thumb.set_missing()
 
     def thumbnails(self) -> set[int]:
-        """CAS parts whose thumbnail is already loaded."""
+        """Items whose thumbnail is already loaded."""
         return set(self._thumbs)
 
     def current_item(self) -> TrayItem | None:
@@ -712,11 +750,16 @@ class HouseholdView(QWidget):
                                SPACE["xxl"] + SPACE["s"], SPACE["xxl"])
         col.setSpacing(0)
 
-        col.addWidget(label(r.item.name or "Unnamed household", "headline", wrap=True))
+        col.addWidget(label(r.item.name or f"Unnamed {r.noun}", "headline", wrap=True))
         col.addSpacing(SPACE["m"])
         sims = r.contents.sims
         names = {s.sim.sim_id: s.sim.name or "Unnamed Sim" for s in sims}
-        if len(sims) > 1:
+        if r.noun != "household":
+            self._chips = []
+            line = item_subtitle(r.item, with_price=True)
+            col.addWidget(label(f"{r.noun.capitalize()} \u00b7 {line}" if line
+                                else r.noun.capitalize(), "secondary"))
+        elif len(sims) > 1:
             row = QHBoxLayout()
             row.setSpacing(SPACE["s"])
             self._chips: list[SimChip] = []
@@ -735,7 +778,7 @@ class HouseholdView(QWidget):
                 col.addWidget(label(names[sims[0].sim.sim_id], "secondary"))
 
         col.addSpacing(SPACE["xl"])
-        self.hero = Hero(self.export_requested.emit)
+        self.hero = Hero(self.export_requested.emit, r.noun)
         self.hero.show_working()
         col.addWidget(self.hero)
 
@@ -766,7 +809,7 @@ class HouseholdView(QWidget):
         groups = self._groups(summary.cc)
         self._cards, self._all_cards, self._sections = {}, [], []
         if not summary.cc:
-            col.addWidget(label("This household doesn't use any CC from your Mods folder.",
+            col.addWidget(label(f"This {r.noun} doesn't use any CC from your Mods folder.",
                                 "secondary", wrap=True))
         elif self._mode == "cards":
             for title, refs in groups:
@@ -774,7 +817,7 @@ class HouseholdView(QWidget):
                 for card in cards:
                     card.toggled.connect(self._card_toggled)
                     self._all_cards.append(card)
-                    if card.ref.ref.kind is RefKind.CAS_PART:
+                    if card.ref.ref.kind in THUMB_TYPES:
                         self._cards.setdefault(card.ref.ref.instance, []).append(card)
                         if card.ref.ref.instance in self._thumbs:
                             card.thumb.set_image(self._thumbs[card.ref.ref.instance])
@@ -843,12 +886,32 @@ class HouseholdView(QWidget):
             details = [(item_label(x), usage_summary(x, with_names),
                         f"Resource instance {x.ref.instance:016X}\n\n{usage_text(x)}")
                        for x in s.missing]
-            sims = "Sims look" if with_names else "Sim looks"
+            if r.noun == "household":
+                looks = "Sims look" if with_names else "Sim looks"
+                extra = ""
+            else:
+                looks = f"{r.noun} looks"
+                extra = (" Downloads from the gallery often use CC that doesn't come with "
+                         "them.")
             self._add_notice(Notice(
                 "alert", "danger_text",
                 f"{plural(n, 'item')} {'isn' if n == 1 else 'aren'}'t installed",
-                f"They're not in your Mods folder or in the game, so the {sims} different "
-                "without them, here and in the export.", details), "tray")
+                f"They're not in your Mods folder or in the game, so the {looks} different "
+                f"without them, here and in the export.{extra}", details), "tray")
+        if r.overrides:
+            n = len(r.overrides)
+            details = [(item_label(x), package_name(x), x.used.rel if x.used else "")
+                       for x in s.cc if x.ref in r.overrides]
+            self._add_notice(Notice(
+                "info", "text_secondary",
+                f"{plural(n, 'game item')} changed by your mods "
+                f"{'is' if n == 1 else 'are'} left out",
+                f"Your mods replace {'this EA item' if n == 1 else 'these EA items'}, mostly to "
+                f"unlock or retune them, which rarely changes how the {r.noun} looks. "
+                "Exported, they'd change the item everywhere in the recipient's game. Click "
+                "one below to include it anyway.", details), "tray")
+        for note in (r.contents.sims[0].notes if r.contents.sims else []):
+            self._add_notice(Notice("info", "text_secondary", "Partly read", note), "tray")
 
     def _fill_plan_notices(self) -> None:
         self._clear_notices("plan")
@@ -881,28 +944,39 @@ class HouseholdView(QWidget):
             n = len(plan.default_replacements)
             details = [(restypes.name(d.key.type), Path(d.copy.rel).name, str(d.key))
                        for d in plan.default_replacements]
-            several = len(self._report.sim_ids) > 1
-            who, wear, look = (("The Sims", "wear", "look") if several
-                               else ("The Sim", "wears", "looks"))
+            if self._report.noun == "household":
+                several = len(self._report.sim_ids) > 1
+                who, wear, look = (("The Sims", "wear", "look") if several
+                                   else ("The Sim", "wears", "looks"))
+                body = (f"{who} {wear} these EA items in a version changed by your Mods "
+                        f"(default replacements). They're exported so the {who.split()[1]} "
+                        f"{look} the same, which changes the item for every Sim in the "
+                        "recipient's game. Leave them out if that's not wanted.")
+            else:
+                body = ("You included EA items in a version changed by your Mods. They're "
+                        "exported as they are, which changes them everywhere in the "
+                        "recipient's game.")
             self._add_notice(Notice(
                 "info", "text_secondary",
                 f"{plural(n, 'item')} {'replaces' if n == 1 else 'replace'} game content",
-                f"{who} {wear} these EA items in a version changed by your Mods (default "
-                f"replacements). They're exported so the {who.split()[1]} {look} the same, "
-                "which "
-                "changes the item for every Sim in the recipient's game. Leave them out if "
-                "that's not wanted.", details), "plan")
+                body, details), "plan")
         if self._gameplay:
             n = len(self._gameplay)
-            details = [(m.rel, plural(m.ids, "id") + " used by the Sims", m.rel)
+            r = self._report
+            if r.noun == "household":
+                users = "the Sims"
+                who = "The Sims use" if len(r.sim_ids) > 1 else "The Sim uses"
+                what = "traits, moods or other gameplay content"
+            else:
+                users, who, what = f"the {r.noun}", f"The {r.noun} uses", "lot traits"
+            details = [(m.rel, plural(m.ids, "id") + f" used by {users}", m.rel)
                        for m in self._gameplay]
             self._add_notice(Notice(
                 "info", "text_secondary",
                 f"{plural(n, 'gameplay mod')} {'is' if n == 1 else 'are'} also needed",
-                f"{'The Sims use' if len(self._report.sim_ids) > 1 else 'The Sim uses'} "
-                "traits, moods or other gameplay content from these mods. They can't be "
-                "trimmed, so they're not exported; the README lists them so the recipient can "
-                "install them.", details), "plan")
+                f"{who} {what} from these mods. They can't be trimmed, so they're not "
+                "exported; the README lists them so the recipient can install them.",
+                details), "plan")
         if plan.unreadable:
             n = len(plan.unreadable)
             details = [(restypes.name(k.type), Path(p).name, reason)

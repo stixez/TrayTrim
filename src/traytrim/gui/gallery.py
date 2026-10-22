@@ -1,4 +1,5 @@
-"""The tray gallery in the sidebar: households with portraits, searchable, keyboard friendly."""
+"""The tray gallery in the sidebar: households with portraits, lots and rooms, one kind at a
+time, searchable, keyboard friendly."""
 
 from __future__ import annotations
 
@@ -8,7 +9,9 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QListView, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem)
 
-from traytrim.gui import theme
+from traytrim import tray
+from traytrim.gui import icons, theme
+from traytrim.gui.household_view import item_subtitle
 from traytrim.gui.theme import RADIUS, SPACE, TYPE
 from traytrim.tray import TrayItem
 
@@ -45,11 +48,11 @@ class TrayModel(QAbstractListModel):
             return None
         item = self.items[index.row()]
         if role == Qt.ItemDataRole.DisplayRole:
-            return item.name or "Unnamed household"
+            return item.name or f"Unnamed {item.kind}"
         if role == Qt.ItemDataRole.AccessibleTextRole:
-            return f"{item.name}: {sims_text(item)}"
+            return f"{item.name}: {subtitle(item)}"
         if role == Qt.ItemDataRole.ToolTipRole:
-            return sims_text(item)
+            return subtitle(item) or None
         if role == ItemRole:
             return item
         return None
@@ -60,26 +63,42 @@ def sims_text(item: TrayItem) -> str:
     return ", ".join(names) if names else "No Sims"
 
 
+def subtitle(item: TrayItem) -> str:
+    """The second line of a row: the Sims of a household, the size of a lot or room."""
+    if item.type == tray.ITEM_HOUSEHOLD:
+        return sims_text(item)
+    return item_subtitle(item)
+
+
 class TrayFilter(QSortFilterProxyModel):
-    """Matches the household name or any Sim's name, case-insensitively."""
+    """One kind of tray item, matching the name or any Sim's name, case-insensitively."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._needle = ""
+        self._type = tray.ITEM_HOUSEHOLD
 
-    def set_text(self, text: str) -> None:
+    def _change(self, apply) -> None:
         if hasattr(self, "beginFilterChange"):  # Qt 6.10+
             self.beginFilterChange()
-            self._needle = text.strip().casefold()
+            apply()
             self.endFilterChange()
         else:
-            self._needle = text.strip().casefold()
+            apply()
             self.invalidateFilter()
 
+    def set_text(self, text: str) -> None:
+        self._change(lambda: setattr(self, "_needle", text.strip().casefold()))
+
+    def set_type(self, item_type: int) -> None:
+        self._change(lambda: setattr(self, "_type", item_type))
+
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
+        item: TrayItem = self.sourceModel().items[row]
+        if item.type != self._type:
+            return False
         if not self._needle:
             return True
-        item: TrayItem = self.sourceModel().items[row]
         haystack = " ".join([item.name, *(s.name for s in item.sims)]).casefold()
         return all(word in haystack for word in self._needle.split())
 
@@ -115,8 +134,17 @@ class TrayDelegate(QStyledItemDelegate):
         art = QRectF(x, rect.top() + SPACE["s"], PORTRAIT, PORTRAIT)
         clip = QPainterPath()
         clip.addRoundedRect(art, RADIUS["control"], RADIUS["control"])
-        image = model.portrait_for(item)
-        if image is not None:
+        image = model.portrait_for(item) if item.type == tray.ITEM_HOUSEHOLD else None
+        if item.type != tray.ITEM_HOUSEHOLD:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(p.surface_hover if not selected else p.window))
+            painter.drawPath(clip)
+            size = 24
+            glyph = icons.image("lot" if item.type == tray.ITEM_LOT else "room",
+                                p.text_secondary, size, painter.device().devicePixelRatioF())
+            painter.drawImage(QRectF(art.center().x() - size / 2, art.center().y() - size / 2,
+                                     size, size), glyph)
+        elif image is not None:
             painter.setClipPath(clip)
             src = QRectF(0, 0, image.width(), image.height())
             side = min(src.width(), src.height())
@@ -146,10 +174,10 @@ class TrayDelegate(QStyledItemDelegate):
         painter.setFont(theme.ui_font("caption"))
         painter.setPen(QColor(p.text_secondary))
         sims_rect = QRect(text_left, name_rect.bottom() + 4, text_width, TYPE["caption"] + 6)
-        sims = painter.fontMetrics().elidedText(sims_text(item), Qt.TextElideMode.ElideRight,
-                                                text_width)
+        second = painter.fontMetrics().elidedText(subtitle(item), Qt.TextElideMode.ElideRight,
+                                                  text_width)
         painter.drawText(sims_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         sims)
+                         second)
         painter.restore()
 
 
@@ -168,7 +196,7 @@ class TrayList(QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setUniformItemSizes(True)
         self.setFrameShape(QListView.Shape.NoFrame)
-        self.setAccessibleName("Households")
+        self.setAccessibleName("Tray items")
         self._filtering = False
         self._chosen: TrayItem | None = None
         self.selectionModel().currentChanged.connect(self._current_changed)
@@ -180,10 +208,12 @@ class TrayList(QListView):
         self._chosen = item
         self.item_selected.emit(item)
 
-    def set_filter(self, text: str) -> None:
-        """Filter rows; the chosen household stays chosen (and selected while it's visible)."""
+    def set_filter(self, text: str, item_type: int | None = None) -> None:
+        """Filter rows; the chosen item stays chosen (and selected while it's visible)."""
         self._filtering = True
         try:
+            if item_type is not None:
+                self.proxy.set_type(item_type)
             self.proxy.set_text(text)
             self.selectionModel().clearSelection()
             self.setCurrentIndex(QModelIndex())

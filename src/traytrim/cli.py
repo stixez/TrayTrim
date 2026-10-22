@@ -184,12 +184,7 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         print(f"No single tray item matches {args.item!r}. `traytrim tray list` shows them.",
               file=sys.stderr)
         return 1
-    hh_file = item.file_with_suffix(".householdbinary")
-    if hh_file is None:
-        print(f"{item.name} is a {item.kind}; only households are supported so far.",
-              file=sys.stderr)
-        return 1
-    contents = tray.read_household(hh_file)
+    contents = tray.read_contents(item)
     with ResourceIndex() as ix:
         if not args.no_update:
             _update_index(ix, folders, quiet=True)
@@ -214,7 +209,8 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
             for sim, uses in r.usage_by_name():
                 print(f"      {sim}: {', '.join(sorted(uses))}")
     if args.plan:
-        _print_plan(refs)
+        from traytrim.resolve import default_excluded
+        _print_plan(refs, default_excluded(contents, refs))
     if missing:
         print("\nMissing (the Sim will look different without these)")
         for r in missing:
@@ -223,12 +219,15 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def _print_plan(refs) -> None:
+def _print_plan(refs, excluded=None) -> None:
     from traytrim.plan import build_plan
     from traytrim.units import percent_smaller
 
     with ResourceIndex() as ix:
-        plan = build_plan(refs, ix)
+        plan = build_plan(refs, ix, excluded)
+    if excluded:
+        print(f"\n{len(excluded)} game objects changed by mods are left out (pass them in with "
+              "the app if you want them).")
     whole = plan.whole_size
     saving = percent_smaller(plan.export_size, whole)
     print(f"\nExport: {human_size(plan.export_size)} in one package, {len(plan.resources):,} "
@@ -261,7 +260,7 @@ def _export_error() -> type[Exception]:
 def cmd_export(args: argparse.Namespace) -> int:
     from traytrim.export import ExportOptions, default_base_name, export_household, safe_name
     from traytrim.plan import build_plan
-    from traytrim.resolve import gameplay_mods, locate
+    from traytrim.resolve import default_excluded, gameplay_mods, locate
 
     folders = _folders(args)
     if folders.tray is None or not folders.tray.is_dir():
@@ -269,11 +268,11 @@ def cmd_export(args: argparse.Namespace) -> int:
         return 1
     items, _failed = tray.scan_tray(folders.tray)
     item = _find_item(items, args.item)
-    if item is None or item.file_with_suffix(".householdbinary") is None:
-        print(f"No single household matches {args.item!r}. `traytrim tray list` shows them.",
-              file=sys.stderr)
+    if item is None:
+        print(f"No single tray item matches {args.item!r}. `traytrim tray list --all` shows "
+              "them.", file=sys.stderr)
         return 1
-    contents = tray.read_household(item.file_with_suffix(".householdbinary"))
+    contents = tray.read_contents(item)
     sim_ids = {s.sim.sim_id for s in contents.sims}
     out = Path(args.out).expanduser() if args.out else paths.desktop_dir()
     base = safe_name(args.name) if args.name else default_base_name(item, contents, sim_ids)
@@ -292,7 +291,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         if not args.no_update:
             _update_index(ix, folders, quiet=True)
         refs = locate(contents, ix)
-        plan = build_plan(refs, ix)
+        plan = build_plan(refs, ix, default_excluded(contents, refs))
         gameplay = gameplay_mods(contents, ix)
         result = export_household(
             item, contents, refs, plan, gameplay, sim_ids,

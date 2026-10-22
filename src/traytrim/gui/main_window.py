@@ -1,4 +1,5 @@
-"""The single main window: tray gallery on the left, the selected household on the right."""
+"""The single main window: tray gallery on the left, the selected household, lot or room on the
+right."""
 
 from __future__ import annotations
 
@@ -7,13 +8,14 @@ from typing import Callable
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QFileDialog, QFrame, QHBoxLayout, QLineEdit, QMainWindow,
-                               QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLineEdit,
+                               QMainWindow, QPushButton, QSizePolicy, QStackedWidget, QStatusBar,
+                               QVBoxLayout, QWidget)
 
 from traytrim import paths, tray
 from traytrim.gui.gallery import PORTRAIT, TrayList
-from traytrim.gui.household_view import THUMB, HouseholdReport, HouseholdView
-from traytrim.gui.images import load_cas_thumbnails, load_portraits
+from traytrim.gui.household_view import THUMB, THUMB_TYPES, HouseholdReport, HouseholdView
+from traytrim.gui.images import load_portraits, load_thumbnails
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
 from traytrim.gui import icons, theme
 from traytrim.gui.tasks import BackgroundTask, describe_error, run_in_background
@@ -23,10 +25,14 @@ from traytrim.index import ResourceIndex
 from traytrim.export import default_base_name
 from traytrim.gui.export_dialog import ExportDialog, ExportRequest
 from traytrim.plan import build_plan
-from traytrim.resolve import Where, for_sims, gameplay_mods, locate
+from traytrim.resolve import Where, default_excluded, for_sims, gameplay_mods, locate
 from traytrim.settings import Settings
 
 SIDEBAR_WIDTH = 320
+# The gallery shows one kind at a time: (setting value, tray item type, tab label, plural noun).
+KINDS = [("household", tray.ITEM_HOUSEHOLD, "Households", "households"),
+         ("lot", tray.ITEM_LOT, "Lots", "lots"),
+         ("room", tray.ITEM_ROOM, "Rooms", "rooms")]
 
 
 class FolderStatus(QWidget):
@@ -72,7 +78,8 @@ class MainWindow(QMainWindow):
         self._full_report: HouseholdReport | None = None  # all Sims, before the Sim filter
         self._selected: tray.TrayItem | None = None
         self._sim_choice: dict[int, set[int]] = {}  # household -> Sims to include
-        self._excluded: dict[int, set] = {}  # household -> TrayRefs left out of the export
+        self._excluded: dict[int, set] = {}  # tray item -> TrayRefs left out of the export
+        self._kind = next((k for k in KINDS if k[0] == settings.tray_kind), KINDS[0])
         self._plan_task: BackgroundTask | None = None
         self._plan_gen = 0
         self._plan_timer = QTimer(self, singleShot=True, interval=300)
@@ -123,8 +130,6 @@ class MainWindow(QMainWindow):
         head.setSpacing(SPACE["m"])
         head.addWidget(label("Tray", "title"))
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Search households and Sims")
-        self.search.setAccessibleName("Search households and Sims")
         self.search.setEnabled(False)
         self.search.textChanged.connect(self._search_changed)
         self._search_icon = self.search.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
@@ -134,7 +139,9 @@ class MainWindow(QMainWindow):
         self._clear_action.setVisible(False)
         self._apply_icons()
         head.addWidget(self.search)
+        head.addWidget(self._kind_tabs())
         col.addLayout(head)
+        self._update_search_hint()
 
         self.sidebar_stack = QStackedWidget()
         self.trays = TrayList()
@@ -153,6 +160,43 @@ class MainWindow(QMainWindow):
         self._state_page = state
         col.addWidget(self.sidebar_stack, 1)
         return side
+
+    def _kind_tabs(self) -> QWidget:
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        group = QButtonGroup(box)
+        self._kind_buttons: dict[str, QPushButton] = {}
+        for i, kind in enumerate(KINDS):
+            b = QPushButton(kind[2])
+            b.setCheckable(True)
+            b.setChecked(kind is self._kind)
+            b.setProperty("kind", "segment")
+            b.setProperty("position", "first" if i == 0 else
+                          "last" if i == len(KINDS) - 1 else "middle")
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setAccessibleName(f"Show {kind[3]}")
+            b.clicked.connect(lambda _c=False, k=kind: self._set_kind(k))
+            group.addButton(b)
+            row.addWidget(b)
+            self._kind_buttons[kind[0]] = b
+        return box
+
+    def _set_kind(self, kind) -> None:
+        if kind is self._kind:
+            return
+        self._kind = kind
+        self._kind_buttons[kind[0]].setChecked(True)
+        self.settings.tray_kind = kind[0]
+        self._update_search_hint()
+        self._search_changed(self.search.text())
+
+    def _update_search_hint(self) -> None:
+        hint = ("Search households and Sims" if self._kind[1] == tray.ITEM_HOUSEHOLD
+                else f"Search {self._kind[3]}")
+        self.search.setPlaceholderText(hint)
+        self.search.setAccessibleName(hint)
 
     def _build_status_bar(self) -> None:
         bar = QStatusBar()
@@ -191,16 +235,12 @@ class MainWindow(QMainWindow):
         if gen != self._tray_gen:
             return
         items, failed = result
+        shown = {k[1] for k in KINDS}
+        self.trays.source.set_items([i for i in items if i.type in shown])
         households = [i for i in items if i.type == tray.ITEM_HOUSEHOLD]
-        self.trays.source.set_items(households)
         if failed:
             self.statusBar().showMessage(
                 f"{len(failed)} tray items couldn't be read and are left out.", 10_000)
-        if not households:
-            self._set_tray_state(
-                "No households in your Tray folder",
-                "Save a household to the library in the game, then reopen TrayTrim.")
-            return
         self.search.setEnabled(True)
         self._search_changed(self.search.text())
         user_dir = self.folders.user_dir
@@ -241,14 +281,22 @@ class MainWindow(QMainWindow):
 
     def _search_changed(self, text: str) -> None:
         self._clear_action.setVisible(bool(text))
-        self.trays.set_filter(text)
-        if self.trays.source.rowCount() == 0:
-            return
+        self.trays.set_filter(text, self._kind[1])
+        if not self.search.isEnabled():
+            return  # the Tray folder isn't read yet, or couldn't be; its state stays shown
+        noun = self._kind[3]
         if self.trays.visible_count():
             self.sidebar_stack.setCurrentWidget(self.trays)
+        elif not any(i.type == self._kind[1] for i in self.trays.source.items):
+            self._set_tray_state(f"No {noun} in your Tray folder",
+                                 f"Save {'a household' if noun == 'households' else 'one'} to "
+                                 "the library in the game, and it shows up here next time you "
+                                 "open TrayTrim.")
         else:
-            self._set_tray_state(f"Nothing matches \u201c{text.strip()}\u201d",
-                                 "Search looks at household names and the names of their Sims.")
+            self._set_tray_state(
+                f"Nothing matches \u201c{text.strip()}\u201d",
+                "Search looks at household names and the names of their Sims."
+                if noun == "households" else f"Search looks at the names of your {noun}.")
 
     def _focus_search(self) -> None:
         if self.search.isEnabled():
@@ -264,8 +312,8 @@ class MainWindow(QMainWindow):
         self._selected = item
         self._analysis_gen += 1
         if item is None:
-            self.household.show_message("No household selected",
-                                        "Pick a household on the left to see which CC it uses.")
+            self.household.show_message("Nothing selected", "Pick a household, lot or room on "
+                                        "the left to see which CC it uses.")
             return
         self._analyse()
 
@@ -283,32 +331,31 @@ class MainWindow(QMainWindow):
             return
         if not self._index_ready:
             self.household.show_message(
-                item.name or "Unnamed household",
+                item.name or f"Unnamed {item.kind}",
                 "Waiting for the index of your Mods and game packages. The CC list appears as "
                 "soon as it's ready.")
-            return
-        hh_file = item.file_with_suffix(".householdbinary")
-        if hh_file is None:
-            self.household.show_message(item.name, "This household's .householdbinary file is "
-                                        "missing from the Tray folder, so its Sims can't be read.")
             return
         gen = self._analysis_gen
         # Only show "Reading..." if it takes long enough to notice; avoids a flash.
         QTimer.singleShot(250, lambda: self._show_reading(gen, item))
 
         def work() -> HouseholdReport:
-            contents = tray.read_household(hh_file)
+            contents = tray.read_contents(item)
             ids = {s.sim.sim_id for s in contents.sims}
             with ResourceIndex() as ix:
                 refs = locate(contents, ix)
-            return HouseholdReport(item, contents, refs, ids)
+            return HouseholdReport(item, contents, refs, ids,
+                                   overrides=default_excluded(contents, refs))
 
         run_in_background(work, lambda r: self._on_report(gen, r),
                           lambda e: self._on_report_failed(gen, item, e))
 
     def _show_reading(self, gen: int, item: tray.TrayItem) -> None:
         if gen == self._analysis_gen and self._done_gen != gen:
-            self.household.show_message(item.name or "Unnamed household", "Reading its Sims.")
+            self.household.show_message(
+                item.name or f"Unnamed {item.kind}",
+                "Reading its Sims." if item.type == tray.ITEM_HOUSEHOLD
+                else "Reading its objects and build items.")
 
     def _on_report(self, gen: int, report: HouseholdReport) -> None:
         if gen != self._analysis_gen:
@@ -317,18 +364,24 @@ class MainWindow(QMainWindow):
         self._full_report = report
         self._show_report(report)
         known = self.household.thumbnails()
-        parts = [r.ref.instance for r in report.refs
-                 if r.where is Where.CC and r.ref.kind is tray.RefKind.CAS_PART
-                 and r.ref.instance not in known]
+        wanted: dict[int, list[int]] = {}  # thumbnail type -> instances
+        for r in report.refs:
+            thumb_type = THUMB_TYPES.get(r.ref.kind)
+            if r.where is Where.CC and thumb_type and r.ref.instance not in known:
+                wanted.setdefault(thumb_type, []).append(r.ref.instance)
         instance = report.item.instance
-        if not parts:
+        if not wanted:
             self.household.set_thumbnails(instance, {}, True)
             return
         user_dir = self.folders.user_dir
 
         def work():
+            images = {}
             with ResourceIndex() as ix:
-                return load_cas_thumbnails(ix, parts, THUMB * 2, user_dir)
+                for thumb_type, instances in wanted.items():
+                    images.update(load_thumbnails(ix, instances, thumb_type, THUMB * 2,
+                                                  user_dir))
+            return images
 
         run_in_background(work, lambda images: self.household.set_thumbnails(instance, images),
                           lambda _e: self.household.set_thumbnails(instance, {}))
@@ -337,9 +390,9 @@ class MainWindow(QMainWindow):
         all_ids = {s.sim.sim_id for s in full.contents.sims}
         chosen = (self._sim_choice.get(full.item.instance, all_ids) & all_ids) or all_ids
         refs = full.refs if chosen == all_ids else for_sims(full.refs, chosen)
-        excluded = self._excluded.setdefault(full.item.instance, set())
+        excluded = self._excluded.setdefault(full.item.instance, set(full.overrides))
         self.household.show_report(HouseholdReport(full.item, full.contents, refs, chosen,
-                                                   excluded))
+                                                   excluded, full.overrides))
         self._start_plan()
 
     # Export plan (sizes, conflicts, missing files)
@@ -403,7 +456,7 @@ class MainWindow(QMainWindow):
     def _on_report_failed(self, gen: int, item: tray.TrayItem, error: Exception) -> None:
         if gen == self._analysis_gen:
             self._done_gen = gen
-            self.household.show_message(f"Couldn't read {item.name or 'this household'}",
+            self.household.show_message(f"Couldn't read {item.name or 'this ' + item.kind}",
                                         describe_error(error))
 
     def _index_finished(self, _result) -> None:

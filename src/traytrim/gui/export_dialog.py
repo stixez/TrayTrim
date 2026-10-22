@@ -67,15 +67,19 @@ class ExportDialog(QDialog):
         col = QVBoxLayout(page)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(SPACE["s"])
+        noun = r.contents.kind
         names = [s.sim.name for s in r.contents.sims if s.sim.sim_id in r.sim_ids]
-        who = names[0] if len(names) == 1 else r.item.name or "household"
+        if noun != "household":
+            who, users = r.item.name or noun, f"this {noun} uses"
+        else:
+            who = names[0] if len(names) == 1 else r.item.name or "household"
+            users = "this Sim uses" if len(names) == 1 else "these Sims use"
         col.addWidget(label(f"Export {who}", "title", wrap=True))
         col.addWidget(label(
-            f"A {human_size(r.plan.export_size)} package with only the CC "
-            f"{'this Sim uses' if len(names) == 1 else 'these Sims use'}, plus the tray "
-            "files, in one zip. Every file is checked against its source afterwards.",
+            f"A {human_size(r.plan.export_size)} package with only the CC {users}, plus the "
+            "tray files, in one zip. Every file is checked against its source afterwards.",
             "secondary", wrap=True))
-        if len(names) < len(r.contents.sims):
+        if noun == "household" and len(names) < len(r.contents.sims):
             col.addWidget(label(
                 "The tray files always hold the whole household; CC is only included for the "
                 "Sims you picked.", "secondary", wrap=True))
@@ -109,7 +113,7 @@ class ExportDialog(QDialog):
         self.kit_chip.setChecked(True)
         self.kit_chip.setAccessibleName("Also make an in-game test kit")
         self.kit_chip.setToolTip("A folder with only the exported package and steps to try the "
-                                 "household in your game with nothing else installed.")
+                                 f"{noun} in your game with nothing else installed.")
         kit_row = QHBoxLayout()
         kit_row.addWidget(self.kit_chip)
         kit_row.addStretch(1)
@@ -117,14 +121,19 @@ class ExportDialog(QDialog):
 
         col.addSpacing(SPACE["s"])
         if r.gameplay:
-            details = [(m.rel, plural(m.ids, "id") + " used by the Sims", m.rel)
+            if noun == "household":
+                by = "the Sims"
+                uses = (f"{'This Sim uses' if len(names) == 1 else 'These Sims use'} traits, "
+                        "moods or other gameplay content")
+            else:
+                by, uses = f"the {noun}", f"This {noun} uses lot traits"
+            details = [(m.rel, plural(m.ids, "id") + f" used by {by}", m.rel)
                        for m in r.gameplay]
             col.addWidget(Notice(
                 "info", "text_secondary",
                 f"{plural(len(r.gameplay), 'gameplay mod')} also needed",
-                f"{'This Sim uses' if len(names) == 1 else 'These Sims use'} traits, moods or "
-                "other gameplay content from mods that can't be trimmed. They're listed in the "
-                "README; the recipient needs them installed.",
+                f"{uses} from mods that can't be trimmed. They're listed in the README; the "
+                "recipient needs them installed.",
                 details))
         col.addWidget(Notice(
             "info", "text_secondary", "For your own use",

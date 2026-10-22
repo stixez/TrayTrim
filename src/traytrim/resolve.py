@@ -24,6 +24,8 @@ EXPECTED_TYPE: dict[RefKind, int | None] = {
     RefKind.SKIN_TONE: restypes.SKIN_TONE,
     RefKind.PELT_LAYER: None,
     RefKind.CUSTOM_TATTOO: None,
+    RefKind.OBJECT: restypes.OBJECT_DEFINITION,
+    RefKind.BUILD: None,  # exact key from the tray file; see locate()
 }
 
 
@@ -83,8 +85,9 @@ def locate(contents: HouseholdContents, index: ResourceIndex,
         if sim_ids is not None and sim.sim.sim_id not in sim_ids:
             continue
         for ref, where in sim.refs.items():
-            # The same part can be listed with and without a body type; merge on kind+instance.
-            key = TrayRef(ref.kind, ref.instance)
+            # The same part can be listed with and without a body type; merge on kind+instance
+            # (and the exact type for build items, whose instances can repeat across types).
+            key = TrayRef(ref.kind, ref.instance, type_id=ref.type_id, res_group=ref.res_group)
             located = merged.get(key)
             if located is None:
                 located = merged[key] = LocatedRef(ref, names=names)
@@ -93,14 +96,29 @@ def locate(contents: HouseholdContents, index: ResourceIndex,
             located.usage.setdefault(sim.sim.sim_id, set()).update(where)
 
     for located in merged.values():
-        expected = EXPECTED_TYPE[located.ref.kind]
-        located.approximate = expected is None
-        located.keys = index.keys_with_instance(located.ref.instance, expected)
+        if located.ref.kind is RefKind.BUILD:
+            located.keys = [ResourceKey(located.ref.type_id, located.ref.res_group or 0,
+                                        located.ref.instance)]
+            located.approximate = False
+        else:
+            expected = EXPECTED_TYPE[located.ref.kind]
+            located.approximate = expected is None
+            located.keys = index.keys_with_instance(located.ref.instance, expected)
         for key in located.keys:
             located.mods += index.mods_hits(key)
             located.game += index.game_hits(key)
         located.mods.sort(key=lambda h: h.load_order)
     return sorted(merged.values(), key=lambda r: (r.ref.group, r.ref.kind.value, r.ref.instance))
+
+
+def default_excluded(contents: HouseholdContents, refs: list[LocatedRef]) -> set[TrayRef]:
+    """What's left out until the user includes it. On lots and rooms that's game objects a mod
+    replaces: mostly unlock and tuning mods that don't change how the build looks, and that
+    would change the object for everyone who installs the export. Sims keep theirs, because
+    there a replaced part (teeth, a head) is part of how the Sim looks."""
+    if contents.kind == "household":
+        return set()
+    return {r.ref for r in refs if r.where is Where.CC and r.game}
 
 
 def for_sims(refs: list[LocatedRef], sim_ids: set[int]) -> list[LocatedRef]:

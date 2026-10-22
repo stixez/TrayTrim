@@ -25,7 +25,15 @@ from dataclasses import dataclass
 from traytrim import restypes
 from traytrim.dbpf import ResourceKey
 
-LEAF_TYPES = restypes.TEXTURE_TYPES | {restypes.THUM, restypes.STRING_TABLE}
+LEAF_TYPES = restypes.TEXTURE_TYPES | {restypes.THUM, restypes.OBJECT_THUMB,
+                                       restypes.STRING_TABLE}
+# Resources whose references may point into other packages (a recolor's object definition
+# using a mesh from a separate mesh package). Their bytes are also checked against the whole
+# index, limited to ASSET_TYPES so an accidental match can't pull in unrelated content.
+CROSS_SCAN_TYPES = {restypes.OBJECT_DEFINITION, restypes.OBJECT_CATALOG, restypes.MODEL}
+ASSET_TYPES = (restypes.TEXTURE_TYPES
+               | {restypes.MODEL, restypes.MODEL_LOD, restypes.LIGHT, restypes.SLOT,
+                  restypes.RIG})
 # Large resources that are never scanned (they're binary payloads, not reference holders).
 _NO_SCAN_TYPES = LEAF_TYPES | {restypes.GEOM, restypes.BLEND_GEOMETRY, restypes.DEFORMER_MAP,
                                 restypes.BONE_DELTA}
@@ -95,6 +103,22 @@ def geom_keys(data: bytes) -> list[ResourceKey]:
             type_id, group, instance = struct.unpack_from("<IIQ", chunk, q + 16 * j)
             out.append(ResourceKey(type_id, group, instance))
     return out
+
+
+_MAX_CROSS_SCAN_BYTES = 256 << 10  # reference holders are small; geometry isn't scanned
+
+
+def large_values(data: bytes) -> set[int]:
+    """Every 64-bit value of at least 2^32 in data, at any byte alignment."""
+    data = data[:_MAX_CROSS_SCAN_BYTES]
+    found: set[int] = set()
+    for shift in range(8):
+        usable = (len(data) - shift) // 8 * 8
+        if usable > 0:
+            found.update(v for v in struct.unpack(f"<{usable // 8}Q",
+                                                   data[shift:shift + usable])
+                         if v >= _MIN_SCAN_INSTANCE)
+    return found
 
 
 def scan_instances(data: bytes, candidates: set[int]) -> set[int]:

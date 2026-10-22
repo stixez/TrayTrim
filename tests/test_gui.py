@@ -9,7 +9,8 @@ pytest.importorskip("PySide6")
 
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from traytrim.gui.gallery import ItemRole, TrayList  # noqa: E402
+from traytrim.gui.gallery import ItemRole, TrayList, subtitle  # noqa: E402
+from traytrim.settings import Settings  # noqa: E402
 from traytrim.tray import TrayItem, TraySim  # noqa: E402
 
 
@@ -36,6 +37,29 @@ def test_search_keeps_the_chosen_household(app):
     assert picked == [items[0]]
     assert view.currentIndex().data(ItemRole) is items[0]
 
+
+
+def test_gallery_shows_one_kind_at_a_time(app):
+    view = TrayList()
+    home = TrayItem(1, 1, "Goth", sims=[TraySim(1, "Bella", "Goth")])
+    lot = TrayItem(2, 2, "Goth Manor", size=(40, 30), bedrooms=3)
+    room = TrayItem(3, 3, "Nursery", size=(6, 4))
+    view.source.set_items([home, lot, room])
+    view.set_filter("", 1)
+    assert [view.proxy.index(r, 0).data(ItemRole) for r in range(view.visible_count())] == [home]
+    view.set_filter("goth", 2)
+    assert view.visible_count() == 1 and view.proxy.index(0, 0).data(ItemRole) is lot
+    assert subtitle(lot) == "40 \u00d7 30 \u00b7 3 bedrooms" and subtitle(home) == "Bella Goth"
+    view.set_filter("goth", 3)
+    assert view.visible_count() == 0
+
+
+def test_settings_keep_only_known_tray_kinds(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text('{"tray_kind": "lot", "theme": "neon"}', encoding="utf-8")
+    assert Settings.load(path).tray_kind == "lot" and Settings.load(path).theme == "system"
+    path.write_text('{"tray_kind": "garden"}', encoding="utf-8")
+    assert Settings.load(path).tray_kind == "household"
 
 def test_index_refresh_while_running_restarts_after_abort(app, tmp_path, monkeypatch):
     import time

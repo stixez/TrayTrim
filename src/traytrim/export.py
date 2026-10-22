@@ -72,6 +72,8 @@ def safe_name(text: str, fallback: str = "Household") -> str:
 
 
 def default_base_name(item: TrayItem, contents: HouseholdContents, sim_ids: set[int]) -> str:
+    if contents.kind != "household":
+        return safe_name(item.name, "Lot" if contents.kind == "lot" else "Room")
     chosen = [s for s in contents.sims if s.sim.sim_id in sim_ids]
     if len(chosen) == 1 and chosen[0].sim.name:
         return safe_name(chosen[0].sim.name)
@@ -256,22 +258,23 @@ def _report(item, contents, sim_ids, plan: Plan, summary, gameplay, verification
 
 def _readme(item, contents, sim_ids, plan: Plan, summary, gameplay, verification,
             package_name) -> str:
-    names = ", ".join(_sim_names(contents, sim_ids))
-    lines = [
-        f"{item.name}: exported with TrayTrim {__version__}",
-        "",
-        f"Sims: {names}",
-        "",
+    kind = contents.kind
+    what = {"household": "these Sims use", "lot": "this lot uses",
+            "room": "this room uses"}[kind]
+    lines = [f"{item.name}: exported with TrayTrim {__version__}", ""]
+    if kind == "household":
+        lines += [f"Sims: {', '.join(_sim_names(contents, sim_ids))}", ""]
+    lines += [
         "How to install",
         "  1. Copy the files in Tray/ into Documents/Electronic Arts/The Sims 4/Tray",
         f"  2. Copy Mods/{package_name} into Documents/Electronic Arts/The Sims 4/Mods",
-        "  3. Start the game and find the household in the Library.",
+        f"  3. Start the game and find the {kind} in the Library.",
         "",
         "What's in the package",
-        f"  Only the custom content these Sims use: {len(plan.resources):,} files "
+        f"  Only the custom content {what}: {len(plan.resources):,} files "
         f"({human_size(plan.export_size)}), taken from {len(plan.source_packages):,} CC "
         "packages.",
-        f"  Game packs the Sims use content from: {_packs_text(summary.packs)}.",
+        f"  Game packs it uses content from: {_packs_text(summary.packs)}.",
     ]
     if plan.default_replacements:
         lines += ["",
@@ -281,7 +284,7 @@ def _readme(item, contents, sim_ids, plan: Plan, summary, gameplay, verification
     if gameplay:
         lines += ["",
                   "Also needed, not included",
-                  "  The Sims use traits, moods or other gameplay content from these mods.",
+                  "  It uses traits, moods or other gameplay content from these mods.",
                   "  They can't be trimmed; install the whole mods from their creators:"]
         lines += [f"    {m.rel}" for m in gameplay]
     if summary.missing or plan.missing:
@@ -307,7 +310,7 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
     sims = user_dir or Path("Documents/Electronic Arts/The Sims 4")
     names = ", ".join(_sim_names(contents, sim_ids))
     steps = [
-        f"In-game test for {item.name} ({names})",
+        f"In-game test for {item.name}" + (f" ({names})" if contents.kind == "household" else ""),
         "",
         "This checks the export in the game with nothing but the exported package installed.",
         "TrayTrim never touches your Mods folder; these steps (or the two .bat files on",
@@ -318,8 +321,9 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
         "3. Make a new, empty Mods folder there, and copy into it:",
         f"     - {package_path.name} from this kit's Mods folder",
         f"     - Resource.cfg from {TEST_BACKUP}",
-        "4. Start the game, open Create a Sim, load the household from the Library and compare",
-        "   it with how it looks with all your mods. The household is already in your Tray.",
+        (f"4. Start the game, load the {contents.kind} from the Library and compare it with how "
+         "it looks"),
+        f"   with all your mods. The {contents.kind} is already in your Tray.",
         "5. Close the game. Delete the test Mods folder and rename "
         f"{TEST_BACKUP} back to Mods.",
         "",

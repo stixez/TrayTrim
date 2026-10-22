@@ -134,7 +134,7 @@ def verify_export(package_path: Path, plan: Plan, refs: list[LocatedRef], index:
                   and not any(k in new_keys for k in r.keys)]
         n_cc = sum(1 for r in refs if r.where is Where.CC and r.ref not in left_out)
         checks.append(Check(
-            "Every CC item the Sims use is included", not absent,
+            "Every CC item in the tray files is included", not absent,
             f"{_plural(n_cc, 'item')} checked against the tray files.",
             [f"{r.ref.kind.value} {r.ref.instance:016X}" for r in absent]))
     return Verification(checks)

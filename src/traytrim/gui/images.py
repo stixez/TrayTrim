@@ -1,5 +1,5 @@
-"""Loading images out of packages: Sim portraits from the game's thumbnail cache, CAS part
-thumbnails from the CC packages. Runs on worker threads; returns QImage (thread-safe), never
+"""Loading images out of packages: Sim portraits from the game's thumbnail cache, CAS part and
+object thumbnails from the CC packages. Runs on worker threads; returns QImage (thread-safe), never
 QPixmap."""
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
-from traytrim import dbpf, restypes
+from traytrim import dbpf
 from traytrim.index import ResourceIndex
 
 # Sim portraits in the game's localthumbcache.package: type observed on real data (the cached
@@ -30,16 +30,17 @@ def load_portraits(user_dir: Path, sim_ids: set[int], size: int) -> dict[int, QI
     return _from_cache(user_dir / "localthumbcache.package", SIM_PORTRAIT, sim_ids, size)
 
 
-def load_cas_thumbnails(index: ResourceIndex, instances: list[int], size: int,
-                        user_dir: Path | None = None) -> dict[int, QImage]:
-    """A thumbnail for each CC part: the THUM in its package when there is one, otherwise the
-    one the game generated in localthumbcache.package (many CC packages only ship a THUM for
-    their first swatch)."""
+def load_thumbnails(index: ResourceIndex, instances: list[int], thumb_type: int, size: int,
+                    user_dir: Path | None = None) -> dict[int, QImage]:
+    """A thumbnail for each CC item: the one of `thumb_type` (THUM for CAS parts, OBJECT_THUMB
+    for objects and build items) with the same instance in its package when there is one,
+    otherwise the one the game generated in localthumbcache.package (many CC packages only
+    ship a thumbnail for their first swatch)."""
     out: dict[int, QImage] = {}
     open_packages: dict[Path, dbpf.Package] = {}
     try:
         for instance in instances:
-            hits = [h for key in index.keys_with_instance(instance, restypes.THUM)
+            hits = [h for key in index.keys_with_instance(instance, thumb_type)
                     for h in index.mods_hits(key)]
             if not hits:
                 continue
@@ -58,7 +59,7 @@ def load_cas_thumbnails(index: ResourceIndex, instances: list[int], size: int,
             pkg.close()
     missing = set(instances) - out.keys()
     if missing and user_dir is not None:
-        out.update(_from_cache(user_dir / "localthumbcache.package", restypes.THUM, missing,
+        out.update(_from_cache(user_dir / "localthumbcache.package", thumb_type, missing,
                                size))
     return out
 

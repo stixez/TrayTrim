@@ -108,6 +108,8 @@ class RefKind(str, Enum):
     SKIN_TONE = "skin_tone"          # TONE
     PELT_LAYER = "pelt_layer"        # pet coat layer; resource type not verified
     CUSTOM_TATTOO = "custom_tattoo"  # texture of a custom tattoo; resource type not verified
+    OBJECT = "object"                # placed object: the instance is its object definition
+    BUILD = "build"                  # exact resource key: walls, floors, roofs, model overrides
 
 
 @dataclass(frozen=True)
@@ -115,6 +117,8 @@ class TrayRef:
     kind: RefKind
     instance: int
     body_type: int | None = None
+    type_id: int | None = None   # BUILD only: the exact resource type and group
+    res_group: int | None = None
 
     @property
     def group(self) -> str:
@@ -122,7 +126,8 @@ class TrayRef:
             return BODY_TYPE_GROUP.get(self.body_type, "Other CAS parts")
         return {RefKind.SCULPT: "Sculpts", RefKind.SIM_MODIFIER: "Sliders",
                 RefKind.SKIN_TONE: "Skin tone", RefKind.PELT_LAYER: "Pet coat",
-                RefKind.CUSTOM_TATTOO: "Custom tattoos"}[self.kind]
+                RefKind.CUSTOM_TATTOO: "Custom tattoos", RefKind.OBJECT: "Objects",
+                RefKind.BUILD: "Build"}[self.kind]
 
 
 @dataclass
@@ -148,6 +153,7 @@ class SimContents:
     # Gathered by walking the data, not by parsing every tracker; used to tell which gameplay
     # mods the Sim depends on.
     gameplay_ids: set[int] = field(default_factory=set)
+    notes: list[str] = field(default_factory=list)  # things that couldn't be read
 
     def add(self, ref: TrayRef, where: str) -> None:
         self.refs.setdefault(ref, set()).add(where)
@@ -155,9 +161,12 @@ class SimContents:
 
 @dataclass
 class HouseholdContents:
+    """What a tray item references. For a lot or room there is one entry in `sims` standing for
+    the build itself, so the rest of TrayTrim treats every kind the same way."""
     name: str
     sims: list[SimContents]
     version: int
+    kind: str = "household"
 
 
 @dataclass
@@ -170,6 +179,12 @@ class TrayItem:
     sims: list[TraySim] = field(default_factory=list)
     files: list[Path] = field(default_factory=list)
     modified: float = 0.0
+    # Lots and rooms (TrayBlueprintMetadata / TrayRoomBlueprintMetadata in Exchange.proto)
+    size: tuple[int, int] | None = None
+    bedrooms: int | None = None
+    bathrooms: int | None = None
+    price: int | None = None     # simoleons
+    lot_traits: list[int] = field(default_factory=list)
 
     @property
     def kind(self) -> str:
@@ -220,10 +235,24 @@ def read_trayitem(path: Path) -> TrayItem:
                         sim_id=pb.first_int(s, 5, 0), first_name=pb.first_str(s, 3),
                         last_name=pb.first_str(s, 4), age=pb.first_int(s, 9),
                         gender=pb.first_int(s, 6), species=pb.first_int(s, 12)))
-        return TrayItem(
+        item = TrayItem(
             instance=pb.first_int(meta, 1, 0), type=pb.first_int(meta, 2, 0),
             name=pb.first_str(meta, 4), description=pb.first_str(meta, 5),
             creator=pb.first_str(meta, 7), sims=sims)
+        if specific:
+            sf = pb.fields_by_number(specific)
+            lot, room = pb.first_bytes(sf, 1), pb.first_bytes(sf, 7)
+            if lot is not None:
+                lf = pb.fields_by_number(lot)
+                item.size = (pb.first_int(lf, 2, 0), pb.first_int(lf, 3, 0))
+                item.bedrooms, item.bathrooms = pb.first_int(lf, 6), pb.first_int(lf, 7)
+                item.price = pb.first_int(lf, 5)
+                item.lot_traits = pb.ints(lf.get(14, []), fixed64=True)
+            elif room is not None:
+                rf = pb.fields_by_number(room)
+                item.size = (pb.first_int(rf, 2, 0), pb.first_int(rf, 3, 0))
+                item.price = pb.first_int(rf, 4)
+        return item
     except ProtobufError as e:
         raise TrayError(f"{path.name} is damaged ({e}).") from None
 
@@ -427,3 +456,177 @@ def _collect_ids(blob: bytes, out: set[int], depth: int = 0) -> bool:
                 out.update(v for v in struct.unpack(f"<{len(value) // 8}Q", value)
                            if v >= _MIN_ID)
     return True
+
+
+# Lots (.blueprint) and rooms (.room)
+#
+# Sources: the snappy container and the lot and room layouts below were described by Harbor
+# (github.com/Harborofficial/Harbor, MIT; src-tauri/src/games/sims_cc_build.rs and
+# sims_cc_architecture.rs) and checked on every lot and room in a real Tray folder. Room
+# version 15 adds a 4-byte value after the "1" marker; Harbor documents version 13 only.
+#
+#   file   uint32 1, uint32 length, snappy-compressed body
+#   lot    uint32 0xFEA1BAAD, uint32 2, uint32 length, objects message, architecture
+#   room   uint32 13|15, uint32 length, keys message (1: repeated key), uint32 1,
+#          [uint32, version 15 only], uint32 length, objects message
+#   objects message   2: repeated object (15 or 4: object definition id, 17: model key)
+#   key message       1: type, 2: group, 3: instance
+#   architecture      uint32 1, uint32 n, n x 16 bytes, uint32 0, then a BNDL v3 bundle whose
+#                     key table (at offset 40: uint32 count, count x type/group/instance)
+#                     lists the walls, floors, roofs, fences... the lot uses. Some lots carry
+#                     more data before the bundle; then the bundle is found by its header and
+#                     accepted only if every table offset in it is consistent.
+
+LOT_MAGIC = 0xFEA1BAAD
+OBJECT_CATALOG = 0x319E4F1D
+_BNDL = 0x424E444C
+
+
+def _build_body(path: Path) -> bytes:
+    from traytrim import snappy
+
+    data = _read(path)
+    if len(data) < 8:
+        raise TrayError(f"{path.name} is too short.")
+    version, size = struct.unpack_from("<II", data, 0)
+    if version != 1 or 8 + size > len(data):
+        raise TrayError(f"{path.name} has an unknown layout (version {version}).")
+    try:
+        return snappy.decompress(data[8:8 + size], 64 << 20)
+    except snappy.SnappyError as e:
+        raise TrayError(f"{path.name} is damaged ({e}).") from None
+
+
+def _key_message(raw: bytes):
+    from traytrim.dbpf import ResourceKey
+
+    f = pb.fields_by_number(raw)
+    t, g, i = pb.first_int(f, 1, 0), pb.first_int(f, 2, 0), pb.first_int(f, 3, 0)
+    if not (t and i) or t > 0xFFFFFFFF or g > 0xFFFFFFFF:
+        return None
+    return ResourceKey(t, g, i)
+
+
+def _objects(raw: bytes, build: SimContents) -> None:
+    placed: dict[int, int] = {}
+    for obj in pb.messages(pb.fields_by_number(raw), 2):
+        o = pb.fields_by_number(obj)
+        definition = pb.first_int(o, 15) or pb.first_int(o, 4)
+        if definition:
+            placed[definition] = placed.get(definition, 0) + 1
+        model = pb.first_bytes(o, 17)
+        key = _key_message(model) if model else None
+        if key is not None:
+            build.add(TrayRef(RefKind.BUILD, key.instance, type_id=key.type,
+                              res_group=key.group), "Model override")
+    for definition, n in placed.items():
+        build.add(TrayRef(RefKind.OBJECT, definition),
+                  "Placed once" if n == 1 else f"Placed {n} times")
+
+
+def _bundle_at(data: bytes, start: int):
+    """Keys from a BNDL v3 bundle at `start`, or None if the header doesn't check out."""
+    from traytrim.dbpf import ResourceKey
+
+    if start < 0 or start + 44 > len(data):
+        return None
+    (magic, version, z1, z2, records, table1, table3, keys_at, repeated,
+     table2, count) = struct.unpack_from("<11I", data, start)
+    bundle = len(data) - start
+    if (magic != _BNDL or version != 3 or z1 or z2 or records != repeated or keys_at != 40
+            or table1 < 44 or table1 + records * 8 != table2
+            or table2 + (records + 1) * 12 != table3 or table3 > bundle
+            or 44 + count * 16 > table1):
+        return None
+    keys = []
+    for i in range(count):
+        t, g, inst = struct.unpack_from("<IIQ", data, start + 44 + 16 * i)
+        if t and inst:
+            keys.append(ResourceKey(t, g, inst))
+    return keys
+
+
+def _architecture(rest: bytes):
+    """(keys, found): the documented position first, then a checked search for the header."""
+    if len(rest) >= 8:
+        lead, pairs = struct.unpack_from("<II", rest, 0)
+        pos = 8 + 16 * pairs
+        if lead == 1 and pos + 4 <= len(rest) and struct.unpack_from("<I", rest, pos)[0] == 0:
+            keys = _bundle_at(rest, pos + 4)
+            if keys is not None:
+                return keys, True
+    start = rest.find(b"LDNB")
+    while start != -1:
+        keys = _bundle_at(rest, start)
+        if keys is not None:
+            return keys, True
+        start = rest.find(b"LDNB", start + 1)
+    return [], False
+
+
+def read_build(item: TrayItem, path: Path) -> HouseholdContents:
+    """The objects and build items a lot (.blueprint) or room (.room) uses."""
+    body = _build_body(path)
+    build = SimContents(TraySim(item.instance, item.name or "Unnamed", ""))
+    kind = "lot" if path.suffix.lower() == ".blueprint" else "room"
+    version = 2
+    try:
+        if kind == "lot":
+            if len(body) < 12:
+                raise TrayError(f"{path.name} is truncated.")
+            magic, version, size = struct.unpack_from("<III", body, 0)
+            if magic != LOT_MAGIC or version != 2:
+                raise TrayError(f"{path.name} uses a lot layout TrayTrim doesn't know "
+                                f"({magic:08X} version {version}).")
+            if 12 + size > len(body):
+                raise TrayError(f"{path.name} is truncated.")
+            _objects(body[12:12 + size], build)
+            keys, found = _architecture(body[12 + size:])
+            if not found:
+                build.notes.append("Walls, floors and roofs couldn't be read from this lot, "
+                                   "so only its objects are included.")
+        else:
+            version, size = struct.unpack_from("<II", body, 0)
+            if version not in (13, 15) or 8 + size > len(body):
+                raise TrayError(f"{path.name} uses a room layout TrayTrim doesn't know "
+                                f"(version {version}).")
+            keys = [k for raw in pb.messages(pb.fields_by_number(body[8:8 + size]), 1)
+                    if (k := _key_message(raw)) is not None]
+            p = 8 + size
+            marker = struct.unpack_from("<I", body, p)[0]
+            p += 4 + (4 if version >= 15 else 0)
+            objects_size = struct.unpack_from("<I", body, p)[0]
+            if marker != 1 or p + 4 + objects_size > len(body):
+                raise TrayError(f"{path.name} has an unexpected room layout.")
+            _objects(body[p + 4:p + 4 + objects_size], build)
+    except (struct.error, ProtobufError) as e:
+        raise TrayError(f"{path.name} is damaged ({e}).") from None
+    for key in keys:
+        if key.type == OBJECT_CATALOG:
+            continue  # rooms list their objects' catalog keys; the objects cover those
+        build.add(TrayRef(RefKind.BUILD, key.instance, type_id=key.type, res_group=key.group),
+                  "Build")
+    build.gameplay_ids.update(item.lot_traits)
+    return HouseholdContents(item.name, [build], version, kind)
+
+
+def read_contents(item: TrayItem) -> HouseholdContents:
+    """What any tray item references: a household's Sims, or a lot's or room's build."""
+    if item.type == ITEM_HOUSEHOLD:
+        path = item.file_with_suffix(".householdbinary")
+        if path is None:
+            raise TrayError(f"{item.name or 'This household'} has no .householdbinary file in "
+                            "the Tray folder, so its Sims can't be read.")
+        return read_household(path)
+    if item.type in (ITEM_LOT, ITEM_ROOM):
+        path = build_file(item)
+        if path is None:
+            raise TrayError(f"{item.name or 'This item'} has no .blueprint or .room file in "
+                            "the Tray folder.")
+        return read_build(item, path)
+    raise TrayError(f"{item.name or 'This item'} is a kind of tray item TrayTrim can't read.")
+
+
+def build_file(item: TrayItem) -> Path | None:
+    """The .blueprint or .room file of a lot or room."""
+    return item.file_with_suffix(".blueprint") or item.file_with_suffix(".room")

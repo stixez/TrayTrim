@@ -255,6 +255,7 @@ def stylesheet(p: Palette) -> str:
         border-top-left-radius: {r['control']}px; border-bottom-left-radius: {r['control']}px;
         border-right: none;
     }}
+    QPushButton[kind="segment"][position="middle"] {{ border-right: none; }}
     QPushButton[kind="segment"][position="last"] {{
         border-top-right-radius: {r['control']}px; border-bottom-right-radius: {r['control']}px;
     }}

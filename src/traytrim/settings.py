@@ -10,6 +10,7 @@ from pathlib import Path
 from traytrim.paths import config_dir
 
 THEMES = ("system", "light", "dark")
+TRAY_KINDS = ("household", "lot", "room")
 
 
 @dataclass
@@ -19,6 +20,7 @@ class Settings:
     output_dir: str | None = None   # last folder exports went to
     theme: str = "system"           # "system", "light" or "dark"
     window_geometry: str | None = None
+    tray_kind: str = "household"    # which kind of tray item the gallery shows
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
@@ -34,7 +36,8 @@ class Settings:
         # stop the app from starting.
         for f in fields(cls):
             value = data.get(f.name)
-            if isinstance(value, str) and (f.name != "theme" or value in THEMES):
+            allowed = {"theme": THEMES, "tray_kind": TRAY_KINDS}.get(f.name)
+            if isinstance(value, str) and (allowed is None or value in allowed):
                 setattr(settings, f.name, value)
         return settings
 
