@@ -5,12 +5,17 @@
 3. Everything the exported CC refers to is in the package or in the game (files that were
    already missing from the Mods folder are listed, they can't be exported).
 4. Every CC item the Sims use, and that wasn't left out, is in the package.
+
+check_zip re-checks an export later from the zip alone (see there).
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
+import tempfile
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -137,4 +142,74 @@ def verify_export(package_path: Path, plan: Plan, refs: list[LocatedRef], index:
             "Every CC item in the tray files is included", not absent,
             f"{_plural(n_cc, 'item')} checked against the tray files.",
             [f"{r.ref.kind.value} {r.ref.instance:016X}" for r in absent]))
+    return Verification(checks)
+
+
+def check_zip(zip_path: Path, progress: Progress | None = None,
+              cancel: threading.Event | None = None) -> Verification:
+    """Check an earlier export on its own, without the Mods folder it came from (which may have
+    changed since): the zip is intact, its package reads back, and both still match the
+    report.json written with it."""
+    checks: list[Check] = []
+    try:
+        z = zipfile.ZipFile(zip_path)
+    except (OSError, zipfile.BadZipFile) as e:
+        reason = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
+        return Verification([Check("The zip opens", False, f"It can't be read: {reason}.")])
+    with z, tempfile.TemporaryDirectory(prefix="traytrim-check-") as tmp:
+        names = z.namelist()
+        packages = [n for n in names if n.startswith("Mods/") and n.endswith(".package")]
+        try:
+            bad = z.testzip()
+        except (OSError, zipfile.BadZipFile, EOFError) as e:
+            bad = f"Its index ({e})"
+        checks.append(Check(
+            "The zip is intact", bad is None and len(packages) == 1 and "report.json" in names,
+            "Every file in it reads back with the checksum it was saved with."
+            if bad is None else f"{bad} is damaged.",
+            [] if len(packages) == 1 and "report.json" in names
+            else ["It doesn't hold one package and a report.json, like a TrayTrim export."]))
+        if not checks[0].passed:
+            return Verification(checks)
+
+        package = Path(z.extract(packages[0], tmp))
+        problems: list[str] = []
+        try:
+            pkg = dbpf.Package(package)
+        except (dbpf.DbpfError, OSError) as e:
+            checks.append(Check("The package reads back", False, f"It can't be opened: {e}"))
+            return Verification(checks)
+        with pkg:
+            entries = list(pkg)
+            for done, entry in enumerate(entries, 1):
+                if cancel is not None and cancel.is_set():
+                    raise Cancelled
+                try:
+                    pkg.read(entry)
+                except dbpf.DbpfError as e:
+                    problems.append(f"{entry.key}: {e}")
+                if progress and (done % 50 == 0 or done == len(entries)):
+                    progress(done, len(entries))
+        checks.append(Check(
+            "The package reads back", not problems,
+            f"{_plural(len(entries), 'file')}, each decompresses." if not problems
+            else f"{_plural(len(problems), 'file')} can't be decompressed.", problems))
+
+        try:
+            report = json.loads(z.read("report.json"))
+            listed = {f["key"]: f["bytes"] for f in report["files"]}
+        except (ValueError, KeyError, TypeError) as e:
+            checks.append(Check("It matches its report", False,
+                                f"report.json can't be read ({e})."))
+            return Verification(checks)
+        found = {str(e.key): e.file_size for e in entries}
+        differ = ([f"{k}: missing from the package" for k in sorted(listed.keys() - found)]
+                  + [f"{k}: not in the report" for k in sorted(found.keys() - listed)]
+                  + [f"{k}: {found[k]:,} bytes, the report says {listed[k]:,}"
+                     for k in sorted(found.keys() & listed.keys()) if found[k] != listed[k]])
+        checks.append(Check(
+            "It matches its report", not differ,
+            f"The same {_plural(len(listed), 'file')}, at the same sizes, as when it was "
+            "exported." if not differ else f"{_plural(len(differ), 'difference')} from "
+            "report.json.", differ))
     return Verification(checks)

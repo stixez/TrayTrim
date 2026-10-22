@@ -24,6 +24,9 @@ from traytrim.gui.widgets import ElidedLabel, label, link_button
 from traytrim.index import ResourceIndex
 from traytrim.export import default_base_name
 from traytrim.gui.export_dialog import ExportDialog, ExportRequest
+from traytrim.batch import Choice
+from traytrim.gui.batch_dialog import BatchDialog
+from traytrim.gui.history_dialog import HistoryDialog
 from traytrim.plan import build_plan
 from traytrim.resolve import Where, default_excluded, for_sims, gameplay_mods, locate
 from traytrim.settings import Settings
@@ -108,6 +111,8 @@ class MainWindow(QMainWindow):
         self.index.stopped.connect(self._check_index_ready)
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self._focus_search)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export)
+        QShortcut(QKeySequence("Ctrl+Shift+E"), self, activated=self._export_several)
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=self._show_history)
         self._show_folders()
         self._restore_geometry()
         # Start with no control focused, so no focus ring shows until the keyboard is used.
@@ -159,6 +164,23 @@ class MainWindow(QMainWindow):
         self.sidebar_stack.addWidget(state)
         self._state_page = state
         col.addWidget(self.sidebar_stack, 1)
+
+        line = QFrame(objectName="divider")
+        line.setFixedHeight(1)
+        col.addWidget(line)
+        foot = QHBoxLayout()
+        foot.setContentsMargins(SPACE["l"], 0, SPACE["l"], SPACE["m"])
+        self.batch_button = link_button("Export several")
+        self.batch_button.setToolTip("Export several at once, one zip each (Ctrl+Shift+E)")
+        self.batch_button.clicked.connect(self._export_several)
+        self.batch_button.setEnabled(False)
+        history = link_button("Export history")
+        history.setToolTip("Earlier exports, and checking them again (Ctrl+H)")
+        history.clicked.connect(self._show_history)
+        foot.addWidget(self.batch_button)
+        foot.addStretch(1)
+        foot.addWidget(history)
+        col.addLayout(foot)
         return side
 
     def _kind_tabs(self) -> QWidget:
@@ -282,6 +304,7 @@ class MainWindow(QMainWindow):
     def _search_changed(self, text: str) -> None:
         self._clear_action.setVisible(bool(text))
         self.trays.set_filter(text, self._kind[1])
+        self._update_batch_button()
         if not self.search.isEnabled():
             return  # the Tray folder isn't read yet, or couldn't be; its state stays shown
         noun = self._kind[3]
@@ -449,6 +472,30 @@ class MainWindow(QMainWindow):
                                 self.folders.user_dir, self.folders.game_dir)
         ExportDialog(request, self.settings, self).exec()
 
+    def _kind_items(self) -> list[tray.TrayItem]:
+        return [i for i in self.trays.source.items if i.type == self._kind[1]]
+
+    def _update_batch_button(self) -> None:
+        self.batch_button.setEnabled(self._index_ready and bool(self._kind_items()))
+
+    def _export_several(self) -> None:
+        items = self._kind_items()
+        if not items:
+            return
+        if not self._index_ready:
+            self.statusBar().showMessage("Exports can start once the index of your Mods and "
+                                         "game packages is ready.", 10_000)
+            return
+        choices = {i.instance: Choice(self._sim_choice.get(i.instance),
+                                      self._excluded.get(i.instance)) for i in items
+                   if i.instance in self._sim_choice or i.instance in self._excluded}
+        selected = self._selected.instance if self._selected is not None else None
+        BatchDialog(items, self._kind[3], choices, self.settings, self.folders.user_dir,
+                    self.folders.game_dir, selected, self).exec()
+
+    def _show_history(self) -> None:
+        HistoryDialog(self).exec()
+
     def _on_plan_failed(self, gen: int, instance: int, error: Exception) -> None:
         if gen == self._plan_gen:
             self.household.show_plan_error(instance, describe_error(error), self._start_plan)
@@ -461,6 +508,7 @@ class MainWindow(QMainWindow):
 
     def _index_finished(self, _result) -> None:
         self._index_ready = True
+        self._update_batch_button()
         self._analysis_gen += 1
         self._analyse()
 
@@ -479,6 +527,7 @@ class MainWindow(QMainWindow):
         def done(complete: bool) -> None:
             if complete and tray_gen == self._tray_gen and not self._index_ready:
                 self._index_ready = True
+                self._update_batch_button()
                 self._analysis_gen += 1
                 self._analyse()
 
@@ -527,6 +576,7 @@ class MainWindow(QMainWindow):
 
     def _folders_changed(self) -> None:
         self._index_ready = False
+        self._update_batch_button()
         self._show_folders()
         self._check_index_ready()
         self._refresh_index()

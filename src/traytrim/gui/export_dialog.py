@@ -23,7 +23,7 @@ from traytrim.settings import Settings
 from traytrim.tray import HouseholdContents, TrayItem
 from traytrim.units import human_size
 
-_STEPS = {"package": "Copying the CC into one package", "verify": "Checking the export",
+STEPS = {"package": "Copying the CC into one package", "verify": "Checking the export",
           "zip": "Zipping"}
 
 
@@ -278,7 +278,7 @@ class ExportDialog(QDialog):
                     r.item, r.contents, r.refs, r.plan, r.gameplay, r.sim_ids, options, ix,
                     lambda step, done, total: task.report(step, done, total), task.cancelled)
 
-        self.step_label.setText(_STEPS["package"])
+        self.step_label.setText(STEPS["package"])
         self.bar.setRange(0, 0)
         self.cancel_button.setEnabled(True)
         self.pages.setCurrentIndex(1)
@@ -292,7 +292,7 @@ class ExportDialog(QDialog):
 
     def _progress(self, args: tuple) -> None:
         step, done, total = args
-        self.step_label.setText(f"{_STEPS[step]}: {done:,} of {total:,}")
+        self.step_label.setText(f"{STEPS[step]}: {done:,} of {total:,}")
         self.bar.setRange(0, max(total, 1))
         self.bar.setValue(done)
 

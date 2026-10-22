@@ -88,3 +88,29 @@ def test_index_refresh_while_running_restarts_after_abort(app, tmp_path, monkeyp
         app.processEvents()
         time.sleep(0.01)
     assert len(results) == 1 and results[0].mods_packages == 1
+
+
+def test_history_dates():
+    from datetime import datetime
+
+    from traytrim.gui.history_dialog import when_text
+
+    now = datetime(2026, 10, 22, 23, 30)
+    assert when_text("2026-10-22T23:16:11", now) == "Today, 23:16"
+    assert when_text("2026-10-21T09:02:00", now) == "Yesterday, 09:02"
+    assert when_text("2026-10-03T14:00:00", now) == "3 Oct 2026, 14:00"
+    assert when_text("not a date", now) == ""
+
+
+def test_batch_dialog_picking(app, tmp_path):
+    from traytrim.gui.batch_dialog import BatchDialog
+
+    lots = [TrayItem(i, 2, f"Lot {i}", size=(20, 20)) for i in range(1, 4)]
+    dialog = BatchDialog(lots, "lots", {}, Settings(output_dir=str(tmp_path)), None, None,
+                         preselect=2)
+    assert [r.isChecked() for r in dialog._rows] == [False, True, False]
+    assert dialog.export_button.text() == "Export 1"
+    dialog._set_all(True)
+    assert dialog.count_label.text() == "3 of 3 selected"
+    dialog._set_all(False)
+    assert not dialog.export_button.isEnabled() and dialog.count_label.text() == "3 lots"

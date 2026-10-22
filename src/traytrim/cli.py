@@ -264,9 +264,8 @@ def _export_error() -> type[Exception]:
 
 
 def cmd_export(args: argparse.Namespace) -> int:
-    from traytrim.export import ExportOptions, default_base_name, export_household, safe_name
-    from traytrim.plan import build_plan
-    from traytrim.resolve import default_excluded, gameplay_mods, locate
+    from traytrim.batch import export_prepared, prepare
+    from traytrim.export import ExportOptions, safe_name
 
     folders = _folders(args)
     if folders.tray is None or not folders.tray.is_dir():
@@ -278,10 +277,7 @@ def cmd_export(args: argparse.Namespace) -> int:
         print(f"No single tray item matches {args.item!r}. `traytrim tray list --all` shows "
               "them.", file=sys.stderr)
         return 1
-    contents = tray.read_contents(item)
-    sim_ids = {s.sim.sim_id for s in contents.sims}
     out = Path(args.out).expanduser() if args.out else paths.desktop_dir()
-    base = safe_name(args.name) if args.name else default_base_name(item, contents, sim_ids)
     steps = {"package": "Copying files", "verify": "Checking", "zip": "Zipping"}
     last = [0.0]
 
@@ -296,13 +292,11 @@ def cmd_export(args: argparse.Namespace) -> int:
     with ResourceIndex() as ix:
         if not args.no_update:
             _update_index(ix, folders, quiet=True)
-        refs = locate(contents, ix)
-        plan = build_plan(refs, ix, default_excluded(contents, refs))
-        gameplay = gameplay_mods(contents, ix)
-        result = export_household(
-            item, contents, refs, plan, gameplay, sim_ids,
-            ExportOptions(out, base, not args.no_test_kit, folders.user_dir,
-                          folders.game_dir), ix, progress)
+        prepared = prepare(item, ix)
+        base = safe_name(args.name) if args.name else prepared.base_name
+        result = export_prepared(
+            prepared, ExportOptions(out, base, not args.no_test_kit, folders.user_dir,
+                                    folders.game_dir), ix, progress)
     print(f"{result.zip_path}  ({human_size(result.zip_size)})")
     for check in result.verification.checks:
         print(f"  [{'ok' if check.passed else 'FAILED'}] {check.name}: {check.detail}")
@@ -315,6 +309,17 @@ def cmd_export(args: argparse.Namespace) -> int:
     if result.test_kit:
         print(f"In-game test kit: {result.test_kit}")
     return 0 if result.verification.ok else 1
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    from traytrim.verify import check_zip
+
+    verification = check_zip(Path(args.zip))
+    for check in verification.checks:
+        print(f"[{'ok' if check.passed else 'FAILED'}] {check.name}: {check.detail}")
+        for problem in check.problems[:20]:
+            print(f"    {problem}")
+    return 0 if verification.ok else 1
 
 
 def cmd_gui(args: argparse.Namespace) -> int:
@@ -382,6 +387,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="don't make the in-game test folder")
     export.add_argument("--no-update", action="store_true", help="use the index as it is")
     export.set_defaults(func=cmd_export)
+
+    check = sub.add_parser("check", help="check an earlier export's zip again (read-only)")
+    check.add_argument("zip")
+    check.set_defaults(func=cmd_check)
 
     gui = sub.add_parser("gui", help="open the app")
     gui.add_argument("--theme", choices=("system", "light", "dark"),

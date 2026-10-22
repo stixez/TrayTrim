@@ -46,6 +46,8 @@ packages they live in, writes them into one package next to the tray files, and 
   replacements, are listed in the export's README.
 - **Prepares an in-game test**: a folder with only the export and steps to try it in your game
   with nothing else installed, then put your Mods back.
+- **Exports several at once**, one verified zip each, and keeps a history of your exports. Any
+  earlier zip can be checked again later, without the Mods folder it came from.
 
 <table>
   <tr>
@@ -129,6 +131,7 @@ traytrim                    # open the app
 traytrim tray list --all    # households, lots and rooms in your Tray folder
 traytrim tray show "Camille" --plan
 traytrim export "Camille" --out ./exports
+traytrim check ./exports/Camille_Moreau_TrayTrim.zip
 traytrim index              # build or refresh the index
 traytrim which 034AEECB:80000000:85C005D0625B6DAB
 traytrim info Some.package --list --verify
