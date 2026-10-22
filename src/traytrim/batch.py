@@ -41,6 +41,11 @@ def locate_item(item: TrayItem, index: ResourceIndex) -> Located:
     return Located(item, contents, refs, default_excluded(contents, refs))
 
 
+def pick_sims(chosen: set[int] | None, all_ids: set[int]) -> set[int]:
+    """The Sims an export is for: the chosen ones still in the household, else all."""
+    return ((chosen or set()) & all_ids) or all_ids
+
+
 def scoped_refs(refs: list[LocatedRef], all_ids: set[int], sim_ids: set[int]
                 ) -> list[LocatedRef]:
     """The references of just these Sims (all of them when every Sim is chosen)."""
@@ -53,6 +58,20 @@ def plan_refs(contents: HouseholdContents, refs: list[LocatedRef], sim_ids: set[
               cancel: threading.Event | None = None) -> tuple[Plan, list[GameplayMod]]:
     plan = build_plan(refs, index, excluded, progress, cancel, copies)
     return plan, gameplay_mods(contents, index, sim_ids)
+
+
+def _scope(item: TrayItem, index: ResourceIndex, choice: Choice):
+    """(located, Sims, their refs, what's left out) for an item and the user's choice."""
+    located = locate_item(item, index)
+    sim_ids = pick_sims(choice.sim_ids, located.sim_ids)
+    refs = scoped_refs(located.refs, located.sim_ids, sim_ids)
+    excluded = choice.excluded if choice.excluded is not None else located.start_excluded
+    return located, sim_ids, refs, excluded
+
+
+def _merge_key(ref: TrayRef) -> TrayRef:
+    """The same item listed with and without a body type is one item (as in locate)."""
+    return TrayRef(ref.kind, ref.instance, type_id=ref.type_id, res_group=ref.res_group)
 
 
 @dataclass
@@ -80,11 +99,7 @@ def prepare(item: TrayItem, index: ResourceIndex, choice: Choice | None = None,
     """Everything an export of `item` needs. Defaults: every Sim of a household, and for lots
     and rooms the EA objects changed by mods left out (see resolve.default_excluded)."""
     choice = choice or Choice()
-    located = locate_item(item, index)
-    all_ids = located.sim_ids
-    sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
-    refs = scoped_refs(located.refs, all_ids, sim_ids)
-    excluded = choice.excluded if choice.excluded is not None else located.start_excluded
+    located, sim_ids, refs, excluded = _scope(item, index, choice)
     plan, gameplay = plan_refs(located.contents, refs, sim_ids, excluded, choice.copies, index,
                                progress, cancel)
     return Prepared(item, located.contents, refs, plan, gameplay, sim_ids,
@@ -159,37 +174,42 @@ def export_together(items: list[TrayItem], options: ExportOptions, index: Resour
                     progress: Callable[[str, int, int], None] | None = None,
                     cancel: threading.Event | None = None) -> ExportResult:
     """Export several tray items into one zip with one package holding the CC of all of them
-    (CC they share is in it once): a lot with the household that lives there, say.
+    (CC they share is in it once): a lot with the household that lives there, say. An item is
+    left out only if every item using it leaves it out; where two items chose different copies
+    of the same file, the first one's choice counts.
     progress(step, done, total): "plan", then the export steps."""
     choices = choices or {}
     parts: list[Part] = []
     merged: dict[TrayRef, LocatedRef] = {}
     kept: set[TrayRef] = set()      # included by at least one item
-    every: set[TrayRef] = set()
     copies: dict[ResourceKey, Path] = {}
+    shown_names: set[str] = set()   # Sim names already used by an earlier item
     for item in items:
         if cancel is not None and cancel.is_set():
             raise Cancelled
         choice = choices.get(item.instance) or Choice()
-        located = locate_item(item, index)
-        all_ids = located.sim_ids
-        sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
-        refs = scoped_refs(located.refs, all_ids, sim_ids)
-        excluded = choice.excluded if choice.excluded is not None else located.start_excluded
+        located, sim_ids, refs, excluded = _scope(item, index, choice)
         parts.append(Part(item, located.contents, sim_ids))
-        copies.update(choice.copies)
+        for key, path in choice.copies.items():
+            copies.setdefault(key, path)
+        left_out = {_merge_key(x) for x in excluded}
+        # Two households can each have an "Alex Smith": tell them apart by household.
+        names_here = {n for r in refs for n in r.names.values()}
+        clash = names_here & shown_names
+        shown_names |= names_here
         for r in refs:
-            every.add(r.ref)
-            if r.ref not in excluded:
-                kept.add(r.ref)
-            if r.ref in merged:
-                both = merged[r.ref]
-                merged[r.ref] = replace(both, usage={**both.usage, **r.usage},
-                                        names={**both.names, **r.names})
+            key = _merge_key(r.ref)
+            if key not in left_out:
+                kept.add(key)
+            names = {sim: (f"{n} ({item.name})" if n in clash else n)
+                     for sim, n in r.names.items()}
+            if key in merged:
+                both = merged[key]
+                merged[key] = replace(both, usage={**both.usage, **r.usage},
+                                      names={**both.names, **names})
             else:
-                merged[r.ref] = r
-    # Left out only where every item that uses it leaves it out.
-    excluded_all = every - kept
+                merged[key] = replace(r, names=names)
+    excluded_all = {merged[key].ref for key in merged.keys() - kept}
     refs_all = list(merged.values())
     plan = build_plan(refs_all, index, excluded_all,
                       (lambda d, t: progress("plan", d, t)) if progress else None, cancel,

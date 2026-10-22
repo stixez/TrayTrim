@@ -326,9 +326,10 @@ class BatchDialog(QDialog):
 
     def _update_count(self) -> None:
         n = len(self._picked())
-        self.count_label.setText(f"{n} of {len(self._rows)} selected" if n
-                                 else plural(len(self._rows), "item"))
         together = self.together_chip.isChecked()
+        self.count_label.setText(
+            "Pick at least two to export together" if together and n < 2
+            else f"{n} of {len(self._rows)} selected" if n else plural(len(self._rows), "item"))
         self.export_button.setEnabled(n > 1 if together else n > 0)
         self.export_button.setText("Export together" if together
                                    else f"Export {n}" if n else "Export")

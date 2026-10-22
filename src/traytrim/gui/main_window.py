@@ -28,13 +28,16 @@ from traytrim.gui.export_dialog import ExportDialog, ExportRequest
 from traytrim.batch import Choice
 from traytrim.gui.batch_dialog import BatchDialog
 from traytrim.gui.history_dialog import HistoryDialog
-from traytrim.batch import locate_item, plan_refs, scoped_refs
+from traytrim.batch import locate_item, pick_sims, plan_refs, scoped_refs
 from traytrim.names import item_names
 from traytrim.resolve import Where
 from traytrim.settings import Settings
 
 SIDEBAR_WIDTH = 320
-PICTURE_WIDTH = 300  # the size the game saves the small tray pictures at
+# Tray pictures: small in the gallery (a square crop of a 3:2 picture fills the tile at 2x),
+# the game's full 300 px for the selected item's header.
+GALLERY_PICTURE_WIDTH = PORTRAIT * 3
+PICTURE_WIDTH = 300
 # The gallery shows one kind at a time: (setting value, tray item type, tab label, plural noun).
 KINDS = [("household", tray.ITEM_HOUSEHOLD, "Households", "households"),
          ("lot", tray.ITEM_LOT, "Lots", "lots"),
@@ -85,7 +88,7 @@ class MainWindow(QMainWindow):
         self._selected: tray.TrayItem | None = None
         # tray item -> the user's Sims, left-out items and chosen copies (see batch.Choice)
         self._choices: dict[int, Choice] = {}
-        self._names_tried: set = set()  # TrayRefs whose names were read (found or not)
+        self._names_read: set = set()  # TrayRefs whose packages were read (name found or not)
         self._names_cancel: threading.Event | None = None
         self._kind = next((k for k in KINDS if k[0] == settings.tray_kind), KINDS[0])
         self._plan_task: BackgroundTask | None = None
@@ -273,7 +276,7 @@ class MainWindow(QMainWindow):
         self.search.setEnabled(True)
         self._search_changed(self.search.text())
         shown = list(self.trays.source.items)
-        run_in_background(lambda: load_tray_pictures(shown, PICTURE_WIDTH),
+        run_in_background(lambda: load_tray_pictures(shown, GALLERY_PICTURE_WIDTH),
                           lambda pictures: self._on_pictures(gen, pictures),
                           lambda _e: None)  # pictures are a nicety; icons stay
         user_dir = self.folders.user_dir
@@ -290,7 +293,6 @@ class MainWindow(QMainWindow):
     def _on_pictures(self, gen: int, pictures) -> None:
         if gen == self._tray_gen:
             self.trays.source.set_pictures(pictures)
-            self.household.set_pictures(pictures)
 
     def _on_tray_failed(self, gen: int, tray_dir: Path, error: Exception) -> None:
         if gen != self._tray_gen:
@@ -401,6 +403,7 @@ class MainWindow(QMainWindow):
         self._full_report = report
         self._show_report(report)
         self._load_names(report)
+        self._load_picture(report.item)
         known = self.household.thumbnails()
         wanted: dict[int, set[int]] = {}  # thumbnail type -> instances
         for r in report.refs:
@@ -424,27 +427,34 @@ class MainWindow(QMainWindow):
         run_in_background(work, lambda images: self.household.set_thumbnails(instance, images),
                           lambda _e: self.household.set_thumbnails(instance, {}))
 
+    def _load_picture(self, item: tray.TrayItem) -> None:
+        if self.household.has_picture(item.instance):
+            return
+        run_in_background(lambda: load_tray_pictures([item], PICTURE_WIDTH),
+                          lambda pictures: self.household.set_picture(
+                              item.instance, pictures.get(item.instance)),
+                          lambda _e: None)  # the header just has no picture
+
     def _load_names(self, report: HouseholdReport) -> None:
         """Item names come from each CC package's string tables; read them off the UI thread
         and show them when they're there (big lots take a few seconds)."""
         if self._names_cancel is not None:
             self._names_cancel.set()  # the previous item's names aren't wanted any more
-        refs = [r for r in report.refs if r.where is Where.CC and r.ref not in self._names_tried]
+        # Everything not read to the end yet, including what a cancelled read didn't reach.
+        refs = [r for r in report.refs if r.where is Where.CC and r.ref not in self._names_read]
         if not refs:
             return
-        self._names_tried.update(r.ref for r in refs)  # a package without names isn't re-read
         cancel = self._names_cancel = threading.Event()
         instance = report.item.instance
 
-        def failed(_e) -> None:  # names are a nicety; package names stay
-            self._names_tried.difference_update(r.ref for r in refs)
-
         def done(names) -> None:
-            if cancel.is_set():
-                self._names_tried.difference_update(r.ref for r in refs if r.ref not in names)
+            # A read that ran to the end covered every ref (packages without names too); a
+            # cancelled one only what it found.
+            self._names_read.update(names if cancel.is_set() else (r.ref for r in refs))
             self.household.set_names(instance, names)
 
-        run_in_background(lambda: item_names(refs, cancel), done, failed)
+        run_in_background(lambda: item_names(refs, cancel), done,
+                          lambda _e: None)  # names are a nicety; package names stay
 
     def _choice(self, instance: int) -> Choice:
         return self._choices.setdefault(instance, Choice())
@@ -454,7 +464,7 @@ class MainWindow(QMainWindow):
         choice = self._choice(full.item.instance)
         if choice.excluded is None:
             choice.excluded = set(full.overrides)
-        chosen = ((choice.sim_ids or all_ids) & all_ids) or all_ids
+        chosen = pick_sims(choice.sim_ids, all_ids)
         refs = scoped_refs(full.refs, all_ids, chosen)
         self.household.show_report(HouseholdReport(full.item, full.contents, refs, chosen,
                                                    choice.excluded, full.overrides,
@@ -569,7 +579,7 @@ class MainWindow(QMainWindow):
     def _index_finished(self, _result) -> None:
         self._index_ready = True
         # Packages may have changed: names are read again as items are shown.
-        self._names_tried.clear()
+        self._names_read.clear()
         self.household.forget_names()
         self._update_batch_button()
         self._analysis_gen += 1

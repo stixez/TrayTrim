@@ -114,12 +114,14 @@ def test_batch_dialog_picking(app, tmp_path):
     assert [h.text() for h in dialog._headings] == ["Households", "Lots"]
     assert [r.isChecked() for r in dialog._rows] == [False, False, True]
     assert dialog.export_button.text() == "Export 1"
-    dialog.together_chip.setChecked(True)  # together needs at least two
+    dialog.together_chip.setChecked(True)  # together needs at least two, and says so
     assert not dialog.export_button.isEnabled()
+    assert dialog.count_label.text() == "Pick at least two to export together"
     dialog._rows[0].setChecked(True)
     assert dialog.export_button.isEnabled() and dialog.export_button.text() == "Export together"
     dialog._set_all(True)
     assert dialog.count_label.text() == "3 of 3 selected"
+    dialog.together_chip.setChecked(False)
     dialog._set_all(False)
     assert not dialog.export_button.isEnabled() and dialog.count_label.text() == "3 items"
 

@@ -178,3 +178,14 @@ def test_export_together_with_nothing_to_export(tmp_path, index, tray_dir):  # n
         export_together([room], ExportOptions(tmp_path / "out", "", False), index,
                         {room.instance: Choice(excluded=everything)})
     assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())
+
+
+def test_merging_and_picking_sims():
+    from traytrim.batch import _merge_key, pick_sims
+
+    hair = TrayRef(RefKind.CAS_PART, 0x10, body_type=2)
+    assert _merge_key(hair) == _merge_key(TrayRef(RefKind.CAS_PART, 0x10))
+    wall = TrayRef(RefKind.BUILD, 0x10, type_id=WALL.type, res_group=0)
+    assert _merge_key(wall) != _merge_key(hair)
+    assert pick_sims({1, 9}, {1, 2}) == {1}
+    assert pick_sims({9}, {1, 2}) == {1, 2} == pick_sims(None, {1, 2})

@@ -77,9 +77,13 @@ class Part:
         return self.contents.kind
 
 
+def part_name(part: Part) -> str:
+    return part.item.name or f"Unnamed {part.kind}"
+
+
 def bundle_title(parts: list[Part]) -> str:
     """"Seaside", "Seaside and Moreau", "Seaside, Moreau and Nursery", "Seaside and 3 more"."""
-    names = [p.item.name or f"Unnamed {p.kind}" for p in parts]
+    names = [part_name(p) for p in parts]
     if len(names) <= 1:
         return names[0] if names else ""
     if len(names) <= 3:
@@ -260,7 +264,7 @@ def _packs_text(packs: list[str]) -> str:
 
 
 def _part_info(part: Part) -> dict:
-    return {"name": part.item.name, "kind": part.kind, "tray_id": part.item.id_text,
+    return {"name": part_name(part), "kind": part.kind, "tray_id": part.item.id_text,
             "sims": (_sim_names(part.contents, part.sim_ids) if part.kind == "household"
                      else [])}
 
@@ -314,7 +318,7 @@ def _readme(parts: list[Part], plan: Plan, summary, gameplay, verification,
         lines += ["Contains"]
         for p in parts:
             sims = _sim_names(p.contents, p.sim_ids) if p.kind == "household" else []
-            lines.append(f"  {p.kind.capitalize()}: {p.item.name}"
+            lines.append(f"  {p.kind.capitalize()}: {part_name(p)}"
                          + (f" ({', '.join(sims)})" if sims else ""))
         lines.append("")
     find = "them" if kind == "bundle" else f"the {kind}"

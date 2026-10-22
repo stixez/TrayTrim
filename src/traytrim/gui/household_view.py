@@ -412,6 +412,7 @@ class Section(QWidget):
         col.addLayout(head)
         holder = QWidget()
         flow = FlowLayout(holder, spacing=SPACE["m"])
+        self._flow = flow
         for card in cards:
             flow.addWidget(card)
         holder.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
@@ -419,6 +420,15 @@ class Section(QWidget):
 
     def set_size(self, size: int | None) -> None:
         self.size_label.setText(human_size(size) if size else "")
+
+    def reorder(self, key) -> None:
+        """Put the cards in a new order without building them again."""
+        self.cards.sort(key=key)
+        while self._flow.count():
+            self._flow.takeAt(0)
+        for card in self.cards:
+            self._flow.addWidget(card)
+        self._flow.invalidate()
 
     def show_matching(self, matching: int) -> None:
         self.setVisible(matching > 0)
@@ -698,6 +708,8 @@ class HouseholdView(QWidget):
         self._search: QLineEdit | None = None
         self._list: CcList | None = None
         self._pictures: dict[int, QImage] = {}  # tray item -> its own picture
+        self._head: QHBoxLayout | None = None
+        self._head_picture: Picture | None = None
         self._report: HouseholdReport | None = None
         self._plan: Plan | None = None
         self._gameplay: list = []
@@ -846,20 +858,37 @@ class HouseholdView(QWidget):
         return set(self._thumbs)
 
     def set_names(self, instance: int, names: dict[TrayRef, ItemName]) -> None:
-        """Item names read from their packages arrive after the report is shown; the page is
-        built again so every sort uses them."""
+        """Item names read from their packages arrive after the report is shown. Cards take
+        them in place (and each section re-sorts); the list and the name sort are rebuilt."""
         self._names.update(names)
-        if self._report is not None and self._report.item.instance == instance and names:
+        if self._report is None or self._report.item.instance != instance or not names:
+            return
+        if self._mode == "list" or self._sort == "name":
             self._rebuild()
+            return
+        for card in self._all_cards:
+            card.set_name(self._names.get(card.ref.ref))
+        if self._sort == "category":
+            for section in self._sections:
+                section.reorder(lambda c: (item_label(c.ref), self._title(c.ref).casefold()))
+        self._apply_filter()
 
     def forget_names(self) -> None:
         """The Mods folder changed: names may have too."""
         self._names.clear()
 
-    def set_pictures(self, pictures: dict[int, QImage]) -> None:
-        self._pictures.update(pictures)
-        if self._report is not None and self._report.item.instance in pictures:
-            self._rebuild()
+    def has_picture(self, instance: int) -> bool:
+        return instance in self._pictures
+
+    def set_picture(self, instance: int, picture: QImage | None) -> None:
+        """The item's own picture, shown in the header once it's loaded."""
+        if picture is None:
+            return
+        self._pictures[instance] = picture
+        if (self._report is not None and self._report.item.instance == instance
+                and self._head_picture is None):
+            self._head_picture = Picture(picture, 150)
+            self._head.insertWidget(0, self._head_picture, 0, Qt.AlignmentFlag.AlignTop)
 
     def current_item(self) -> TrayItem | None:
         return self._report.item if self._report else None
@@ -909,9 +938,11 @@ class HouseholdView(QWidget):
 
         head = QHBoxLayout()
         head.setSpacing(SPACE["l"])
+        self._head, self._head_picture = head, None
         picture = self._pictures.get(r.item.instance)
         if picture is not None:
-            head.addWidget(Picture(picture, 150), 0, Qt.AlignmentFlag.AlignTop)
+            self._head_picture = Picture(picture, 150)
+            head.addWidget(self._head_picture, 0, Qt.AlignmentFlag.AlignTop)
         titles = QVBoxLayout()
         titles.setSpacing(0)
         head.addLayout(titles, 1)
@@ -1154,7 +1185,7 @@ class HouseholdView(QWidget):
         game.setCheckable(True)
         game.setChecked(not chosen)
         game.triggered.connect(
-            lambda: self.copies_chosen.emit({res.key: None for res in group}))
+            lambda: chosen and self.copies_chosen.emit({res.key: None for res in group}))
         menu.addSeparator()
         for path, rel in packages.items():
             action = menu.addAction(rel)
@@ -1171,7 +1202,8 @@ class HouseholdView(QWidget):
         for res in group:
             has = any(h.path == path for h in res.copies)
             picks[res.key] = path if has and res.copies[-1].path != path else None
-        self.copies_chosen.emit(picks)
+        if any(res.copy.path != (picks[res.key] or res.copies[-1].path) for res in group):
+            self.copies_chosen.emit(picks)
 
     def _add_notice(self, notice: Notice, tag: str) -> None:
         notice.setProperty("phase", tag)
