@@ -1,0 +1,167 @@
+<p align="center">
+  <img src="packaging/assets/TrayTrim-256.png" width="96" height="96" alt="TrayTrim icon">
+</p>
+
+<h1 align="center">TrayTrim</h1>
+
+<p align="center">
+  Export a Sims 4 household with only the custom content its Sims actually use.<br>
+  One small package, checked file by file, instead of gigabytes of whole packages.
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/household-light.png" width="860" alt="TrayTrim showing a household, its export size and its CC">
+</p>
+
+## Why
+
+Tray importers export a Sim "with CC" by copying every package that contains something the Sim
+uses. With merged packages that adds up fast: one lipstick from a 1 GB merge brings the whole
+gigabyte along. On a real Mods folder with 4,500 packages, one single-Sim household came to
+4.96 GB that way. TrayTrim exported the same Sim in 30.5 MB.
+
+TrayTrim reads the tray files, works out exactly which resources the Sims need (CAS parts, meshes,
+textures, thumbnails, sliders, sculpts, skin tones), copies just those out of whatever packages
+they live in, writes them into one package next to the tray files, and checks the result.
+
+## What it does
+
+- **Finds every CC item** the Sims wear, in every outfit, plus genetics, sliders, sculpts and skin
+  tone, straight from the tray files.
+- **Follows every file the CC needs**: meshes, textures in any format, thumbnails, slider shapes,
+  across packages, so recolors that need a separate mesh still work.
+- **Takes the copy the game uses** when the same file is in your Mods more than once with
+  different content, and tells you which one and why.
+- **Lets you leave things out** with a click, and export only some Sims of a household. The size
+  updates as you go.
+- **Never copies game content.** Items from the base game and packs stay out; the report lists the
+  packs the Sims use.
+- **Checks every export**: the package reopens, every file decompresses to the same bytes as its
+  source, everything the CC refers to is there, every CC item is included.
+- **Says what it can't trim**: gameplay mods (traits, moods, careers) the Sims depend on, and default
+  replacements, are listed in the export's README.
+- **Prepares an in-game test**: a folder with only the export and steps to try it in your game
+  with nothing else installed, then put your Mods back.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/family-notices.png" alt="A family with notices about missing CC, conflicting copies and a gameplay mod"></td>
+    <td><img src="docs/screenshots/leave-out.png" alt="Leaving an item out of the export"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/export-light.png" alt="The export dialog"></td>
+    <td><img src="docs/screenshots/verified-light.png" alt="A verified export"></td>
+  </tr>
+  <tr>
+    <td><img src="docs/screenshots/household-dark.png" alt="Dark theme"></td>
+    <td><img src="docs/screenshots/list-view.png" alt="CC as a list"></td>
+  </tr>
+</table>
+
+<sub>Screenshots use an invented household and invented CC.</sub>
+
+## Download
+
+**Windows:** get `TrayTrim-<version>-setup.exe` from the
+[Releases](https://github.com/stixez/TrayTrim/releases) page. It installs for your user only, no
+administrator rights needed, and uninstalls from Windows Settings. A portable zip is there too.
+
+**macOS and Linux (Steam/Proton):** run it from source for now (below). The code is cross-platform
+and its tests run on Windows, macOS and Linux; packaged builds will follow.
+
+## Safety
+
+TrayTrim only **reads** your Sims 4 folders. It never writes, moves, renames or deletes anything in
+Mods or Tray, your saves, the game install, or Sims 4 Studio's folder, and it refuses to save an
+export inside any of them. Exports go to a folder you choose (your Desktop by default); TrayTrim's
+own index and settings live in its cache and config folders.
+
+The optional in-game test kit is the one thing that touches Mods, and only when you run it
+yourself: its steps (or the two `.bat` helpers on Windows) rename your Mods folder for the test and
+put it back afterwards. The helpers refuse to run while the game is open and only restore Mods if
+the test folder holds nothing but the two test files.
+
+## How it works
+
+**Tray files** are the game's own protobuf messages. Their schemas ship with The Sims 4 (compiled
+into `Game/Bin/Python/generated.zip`), and the outfit and body type enums come from the game's Python
+code; [`tray.py`](src/traytrim/tray.py) lists every field used. The small headers around the
+messages were worked out from real files and checked against every household in a real Tray folder.
+
+**The index** of your Mods and of the game (base game, packs and their Delta updates) lives in
+TrayTrim's cache folder. Only packages that changed are read again, so after the first build (about
+a minute for a large Mods folder) a refresh takes about a second. Packages deeper than
+`Mods/Resource.cfg` allows are skipped, like the game does.
+
+**Dependencies:** a CAS part's key list and a mesh's texture list are read directly (their layout
+was checked on thousands of real resources). Sliders, sculpts and other small resources are scanned
+for the ids of resources in their own package. Textures are matched across texture formats, the
+way the game resolves them.
+
+**One assumption the game doesn't document:** when two Mods packages hold the same resource, the
+game uses the one that loads last, and packages load in alphabetical order of their path in Mods.
+Conflict notices say so.
+
+## Limitations
+
+- Changes that affect every Sim and aren't referenced from the tray files can't be found: default
+  replacements of skin, eyes or bodies that the Sims don't wear directly, and script mods. The
+  recipient needs those separately.
+- Lots and rooms aren't supported yet, only households.
+- CC names (string tables) aren't exported; CAS shows the items without them.
+- Many CC creators don't allow re-uploading their work. Exports are meant for your own backups and
+  transfers, or for CC you have the rights to share.
+
+## Command line
+
+Everything the app does is also available from a terminal:
+
+```
+traytrim                    # open the app
+traytrim tray list          # households in your Tray folder
+traytrim tray show "Camille" --plan
+traytrim export "Camille" --out ./exports
+traytrim index              # build or refresh the index
+traytrim which 034AEECB:80000000:85C005D0625B6DAB
+traytrim info Some.package --list --verify
+```
+
+## Run from source
+
+Needs Python 3.12.
+
+```
+git clone https://github.com/stixez/TrayTrim
+cd TrayTrim
+python -m venv .venv
+.venv\Scripts\activate            # macOS / Linux: source .venv/bin/activate
+pip install -e ".[gui,dev]"
+python -m traytrim
+pytest
+```
+
+Build the app and the Windows installer with `pip install -e ".[gui,build]"` and
+`python packaging/build.py` (the installer needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)).
+
+## Contributing
+
+Bug reports and pull requests are welcome. Three rules keep TrayTrim trustworthy:
+
+- Nothing may write to the Sims 4 folders (Mods, Tray, saves), the game or Sims 4 Studio's folder.
+- Formats aren't guessed: every resource type, field or layout has a source noted next to it (the
+  game's own schemas, Sims 4 Toolkit, or a check on real files), and unverified results are marked
+  approximate.
+- No real CC, game or tray files in the repo; tests build small synthetic ones. `pytest` runs on
+  Windows, macOS and Linux in CI.
+
+## License and credits
+
+TrayTrim is released under the [MIT License](LICENSE).
+
+It uses [PySide6](https://doc.qt.io/qtforpython/) (Qt for Python, LGPL) and bundles the
+[IBM Plex](https://github.com/IBM/plex) fonts (SIL Open Font License, see
+`src/traytrim/gui/assets/fonts/OFL.txt`). Resource type ids were cross-checked with
+[Sims 4 Toolkit](https://github.com/sims4toolkit).
+
+TrayTrim is a fan-made tool and isn't affiliated with or endorsed by Electronic Arts or Maxis. The
+Sims is a trademark of Electronic Arts Inc.

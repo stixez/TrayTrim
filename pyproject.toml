@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "traytrim"
+dynamic = ["version"]
+description = "Export a Sims 4 household with only the custom content its Sims use."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "stixez" }]
+requires-python = ">=3.12"
+dependencies = []
+keywords = ["sims 4", "custom content", "tray", "dbpf", "package"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Environment :: X11 Applications :: Qt",
+    "Topic :: Games/Entertainment :: Simulation",
+]
+
+[project.urls]
+Homepage = "https://github.com/stixez/TrayTrim"
+Issues = "https://github.com/stixez/TrayTrim/issues"
+
+[project.optional-dependencies]
+gui = ["PySide6>=6.8"]
+dev = ["pytest>=8"]
+build = ["pyinstaller>=6.10", "pillow>=10"]
+
+[project.scripts]
+traytrim = "traytrim.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "traytrim.__version__" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+traytrim = ["gui/assets/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

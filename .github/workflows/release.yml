@@ -1,0 +1,47 @@
+name: Release
+
+# Push a tag like v0.1.0 to build the Windows installer and a portable zip, and attach them to a
+# GitHub release for that tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install -e ".[gui,dev,build]"
+      - name: Tag matches the app version
+        shell: bash
+        run: |
+          version=$(python -c "import traytrim; print(traytrim.__version__)")
+          test "${GITHUB_REF_NAME}" = "v${version}" || { echo "Tag ${GITHUB_REF_NAME} but traytrim.__version__ is ${version}"; exit 1; }
+      - run: python -m pytest
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+      - run: python packaging/build.py
+      - name: The built app starts
+        shell: pwsh
+        run: |
+          $env:TRAYTRIM_SMOKE_TEST = "1"
+          $app = Start-Process dist/TrayTrim/TrayTrim.exe -PassThru
+          if (-not $app.WaitForExit(60000)) { Stop-Process -Id $app.Id -Force; throw "TrayTrim.exe didn't quit" }
+          if ($app.ExitCode -ne 0) { throw "TrayTrim.exe exited with $($app.ExitCode)" }
+      - name: Portable zip
+        shell: pwsh
+        run: Compress-Archive -Path dist/TrayTrim -DestinationPath "dist/TrayTrim-${{ github.ref_name }}-windows-portable.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/TrayTrim-*-setup.exe
+            dist/TrayTrim-*-windows-portable.zip

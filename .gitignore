@@ -1,0 +1,17 @@
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+*.spec
+# local caches and test output
+.cache/
+*.package
+*.zip
+!tests/fixtures/**
+# packaging output
+/build/
+/dist/
