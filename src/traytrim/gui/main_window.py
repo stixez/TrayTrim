@@ -3,6 +3,7 @@ right."""
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Callable
 
@@ -15,7 +16,7 @@ from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QHBoxLayout, Q
 from traytrim import paths, tray
 from traytrim.gui.gallery import PORTRAIT, TrayList
 from traytrim.gui.household_view import THUMB, THUMB_TYPES, HouseholdReport, HouseholdView
-from traytrim.gui.images import load_portraits, load_thumbnails
+from traytrim.gui.images import load_portraits, load_thumbnails, load_tray_pictures
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
 from traytrim.gui import icons, theme
 from traytrim.gui.tasks import BackgroundTask, describe_error, run_in_background
@@ -27,12 +28,13 @@ from traytrim.gui.export_dialog import ExportDialog, ExportRequest
 from traytrim.batch import Choice
 from traytrim.gui.batch_dialog import BatchDialog
 from traytrim.gui.history_dialog import HistoryDialog
-from traytrim.batch import Located, locate_item, plan_refs, scoped_refs
+from traytrim.batch import locate_item, plan_refs, scoped_refs
 from traytrim.names import item_names
 from traytrim.resolve import Where
 from traytrim.settings import Settings
 
 SIDEBAR_WIDTH = 320
+PICTURE_WIDTH = 300  # the size the game saves the small tray pictures at
 # The gallery shows one kind at a time: (setting value, tray item type, tab label, plural noun).
 KINDS = [("household", tray.ITEM_HOUSEHOLD, "Households", "households"),
          ("lot", tray.ITEM_LOT, "Lots", "lots"),
@@ -83,6 +85,8 @@ class MainWindow(QMainWindow):
         self._selected: tray.TrayItem | None = None
         # tray item -> the user's Sims, left-out items and chosen copies (see batch.Choice)
         self._choices: dict[int, Choice] = {}
+        self._names_tried: set = set()  # TrayRefs whose names were read (found or not)
+        self._names_cancel: threading.Event | None = None
         self._kind = next((k for k in KINDS if k[0] == settings.tray_kind), KINDS[0])
         self._plan_task: BackgroundTask | None = None
         self._plan_gen = 0
@@ -267,6 +271,10 @@ class MainWindow(QMainWindow):
                 f"{len(failed)} tray items couldn't be read and are left out.", 10_000)
         self.search.setEnabled(True)
         self._search_changed(self.search.text())
+        shown = list(self.trays.source.items)
+        run_in_background(lambda: load_tray_pictures(shown, PICTURE_WIDTH),
+                          lambda pictures: self._on_pictures(gen, pictures),
+                          lambda _e: None)  # pictures are a nicety; icons stay
         user_dir = self.folders.user_dir
         sim_ids = {s.sim_id for i in households for s in i.sims}
         if user_dir is not None:
@@ -277,6 +285,11 @@ class MainWindow(QMainWindow):
     def _on_portraits(self, gen: int, images) -> None:
         if gen == self._tray_gen:
             self.trays.source.set_portraits(images)
+
+    def _on_pictures(self, gen: int, pictures) -> None:
+        if gen == self._tray_gen:
+            self.trays.source.set_pictures(pictures)
+            self.household.set_pictures(pictures)
 
     def _on_tray_failed(self, gen: int, tray_dir: Path, error: Exception) -> None:
         if gen != self._tray_gen:
@@ -413,13 +426,24 @@ class MainWindow(QMainWindow):
     def _load_names(self, report: HouseholdReport) -> None:
         """Item names come from each CC package's string tables; read them off the UI thread
         and show them when they're there (big lots take a few seconds)."""
-        known = self.household.known_names()
-        refs = [r for r in report.refs if r.where is Where.CC and r.ref not in known]
-        if refs:
-            instance = report.item.instance
-            run_in_background(lambda: item_names(refs),
-                              lambda names: self.household.set_names(instance, names),
-                              lambda _e: None)  # names are a nicety; package names stay
+        if self._names_cancel is not None:
+            self._names_cancel.set()  # the previous item's names aren't wanted any more
+        refs = [r for r in report.refs if r.where is Where.CC and r.ref not in self._names_tried]
+        if not refs:
+            return
+        self._names_tried.update(r.ref for r in refs)  # a package without names isn't re-read
+        cancel = self._names_cancel = threading.Event()
+        instance = report.item.instance
+
+        def failed(_e) -> None:  # names are a nicety; package names stay
+            self._names_tried.difference_update(r.ref for r in refs)
+
+        def done(names) -> None:
+            if cancel.is_set():
+                self._names_tried.difference_update(r.ref for r in refs if r.ref not in names)
+            self.household.set_names(instance, names)
+
+        run_in_background(lambda: item_names(refs, cancel), done, failed)
 
     def _choice(self, instance: int) -> Choice:
         return self._choices.setdefault(instance, Choice())
@@ -430,7 +454,7 @@ class MainWindow(QMainWindow):
         if choice.excluded is None:
             choice.excluded = set(full.overrides)
         chosen = ((choice.sim_ids or all_ids) & all_ids) or all_ids
-        refs = scoped_refs(Located(full.item, full.contents, full.refs, full.overrides), chosen)
+        refs = scoped_refs(full.refs, all_ids, chosen)
         self.household.show_report(HouseholdReport(full.item, full.contents, refs, chosen,
                                                    choice.excluded, full.overrides,
                                                    choice.copies))
@@ -547,6 +571,9 @@ class MainWindow(QMainWindow):
 
     def _index_finished(self, _result) -> None:
         self._index_ready = True
+        # Packages may have changed: names are read again as items are shown.
+        self._names_tried.clear()
+        self.household.forget_names()
         self._update_batch_button()
         self._analysis_gen += 1
         self._analyse()

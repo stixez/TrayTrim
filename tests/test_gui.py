@@ -143,5 +143,18 @@ def test_detail_view_search_sort_and_names(app, tmp_path):
     view._search.setText("")
     view._set_sort("name")
     assert [c.title._text for c in view._all_cards] == ["Long Waves", "recolor"]
+
+    # Sorted by size, the order stays put when an item is left out and the plan comes back.
+    from traytrim.plan import build_plan
+    view._set_sort("size")
+    view.set_plan(5, build_plan(refs, index))
+    order = [c.ref.ref for c in view._all_cards]
+    view.set_plan(5, build_plan(refs, index, excluded={order[0]}))
+    assert [c.ref.ref for c in view._all_cards] == order
+
+    # A plan error survives a rebuild (names arriving, a sort change...).
+    view.show_plan_error(5, "Disk on fire", lambda: None)
+    view._rebuild()
+    assert view.hero.number.text() == "Couldn't work out the export"
     view.deleteLater()
     next(gen, None)

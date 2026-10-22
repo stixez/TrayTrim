@@ -40,9 +40,10 @@ def locate_item(item: TrayItem, index: ResourceIndex) -> Located:
     return Located(item, contents, refs, default_excluded(contents, refs))
 
 
-def scoped_refs(located: Located, sim_ids: set[int]) -> list[LocatedRef]:
+def scoped_refs(refs: list[LocatedRef], all_ids: set[int], sim_ids: set[int]
+                ) -> list[LocatedRef]:
     """The references of just these Sims (all of them when every Sim is chosen)."""
-    return located.refs if sim_ids >= located.sim_ids else for_sims(located.refs, sim_ids)
+    return refs if sim_ids >= all_ids else for_sims(refs, sim_ids)
 
 
 def plan_refs(contents: HouseholdContents, refs: list[LocatedRef], sim_ids: set[int],
@@ -81,7 +82,7 @@ def prepare(item: TrayItem, index: ResourceIndex, choice: Choice | None = None,
     located = locate_item(item, index)
     all_ids = located.sim_ids
     sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
-    refs = scoped_refs(located, sim_ids)
+    refs = scoped_refs(located.refs, all_ids, sim_ids)
     excluded = choice.excluded if choice.excluded is not None else located.start_excluded
     plan, gameplay = plan_refs(located.contents, refs, sim_ids, excluded, choice.copies, index,
                                progress, cancel)

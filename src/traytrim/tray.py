@@ -306,6 +306,41 @@ def scan_tray(tray_dir: Path) -> tuple[list[TrayItem], list[tuple[Path, str]]]:
     return items, failed
 
 
+# Tray pictures (.hhi household, .sgi Sim, .bpi lot, .rmi room)
+#
+# Layout: 24 bytes of header (uint32 size, uint32 0, then 16 bytes that are the same in every
+# file), then a JPEG XOR-ed with a repeating 8-byte key. The key is recovered from the JPEG's
+# fixed JFIF start, so it doesn't have to be known in advance. Described by SimsHub
+# (github.com/xNovulon/SimsHub, trayfmt.py); checked on every picture of a real Tray folder
+# (214 files, one key; the few that don't decode are the game's own empty pictures).
+# A lot or room has a small picture (type 0x2 in the file name, 300 x 200; the one the Library
+# shows) and larger ones (0x3, 0x103...).
+
+_JFIF_START = b"\xff\xd8\xff\xe0\x00\x10JF"
+PICTURE_SUFFIXES = (".hhi", ".bpi", ".rmi")
+
+
+def read_tray_picture(path: Path) -> bytes:
+    """The JPEG bytes of a tray picture."""
+    data = _read(path)
+    body = data[24:]
+    if len(body) < 8:
+        raise TrayError(f"{path.name} is too short.")
+    if body.startswith(b"\xff\xd8\xff"):
+        return body
+    key = bytes(a ^ b for a, b in zip(body[:8], _JFIF_START))
+    repeated = (key * (len(body) // 8 + 1))[:len(body)]
+    return (int.from_bytes(body, "little") ^ int.from_bytes(repeated, "little")).to_bytes(
+        len(body), "little")
+
+
+def picture_file(item: TrayItem) -> Path | None:
+    """The item's own picture: the small one where there are several."""
+    pictures = [f for f in item.files if f.suffix.lower() in PICTURE_SUFFIXES]
+    small = [f for f in pictures if (parse_tray_filename(f.name) or (0,))[0] == 2]
+    return (small or sorted(pictures))[0] if pictures else None
+
+
 # .householdbinary
 
 def _household_message(data: bytes, name: str) -> tuple[int, bytes]:

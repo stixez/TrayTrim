@@ -250,6 +250,25 @@ class Thumbnail(QWidget):
                              Qt.AlignmentFlag.AlignCenter, "No preview")
 
 
+class Picture(QWidget):
+    """A tray item's own picture, rounded, `width` wide at its own aspect ratio."""
+
+    def __init__(self, image: QImage, width: int, parent=None):
+        super().__init__(parent)
+        self._image = image
+        height = round(width * image.height() / max(image.width(), 1))
+        self.setFixedSize(width, height)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(self.rect()), RADIUS["control"], RADIUS["control"])
+        painter.setClipPath(path)
+        painter.drawImage(QRectF(self.rect()), self._image)
+
+
 class CcCard(QFrame):
     """One CC item. Click (or Space) to leave it out of the export or put it back."""
 
@@ -534,14 +553,11 @@ class Hero(QWidget):
         self.number.setText("Couldn't work out the export")
         self.saving.setText("")
         self.line.setText(f"{reason}. If the index is being updated, wait for it to finish.")
+        self._on_retry = on_retry
         if self._retry is None:
             self._retry = link_button("Try again")
+            self._retry.clicked.connect(lambda: self._on_retry())
             self.layout().addWidget(self._retry)
-        try:
-            self._retry.clicked.disconnect()
-        except (RuntimeError, TypeError):
-            pass
-        self._retry.clicked.connect(on_retry)
         self._retry.show()
 
     def show_plan(self, plan: Plan) -> None:
@@ -673,11 +689,15 @@ class HouseholdView(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._mode = "cards"
         self._sort = "category"
-        self._query = ""
+        self._query = ""  # as typed; matching ignores outer spaces
         self._names: dict[TrayRef, ItemName] = {}
+        # Size order, fixed once worked out: leaving an item out mustn't move its card.
+        self._size_rank: dict[TrayRef, int] | None = None
+        self._plan_error: tuple[str, object] | None = None  # reason, retry
         self._expanded: set[str] = set()  # notices whose details are open
         self._search: QLineEdit | None = None
         self._list: CcList | None = None
+        self._pictures: dict[int, QImage] = {}  # tray item -> its own picture
         self._report: HouseholdReport | None = None
         self._plan: Plan | None = None
         self._gameplay: list = []
@@ -687,7 +707,7 @@ class HouseholdView(QWidget):
         self._thumbs: dict[int, QImage] = {}
         self._thumbs_done = False
         self._theme_timer = QTimer(self, singleShot=True, interval=0)
-        self._theme_timer.timeout.connect(self._rebuild_for_theme)
+        self._theme_timer.timeout.connect(self._rebuild)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -745,8 +765,10 @@ class HouseholdView(QWidget):
             self._thumbs_done = False
             self._query = ""
             self._expanded.clear()
+            self._size_rank = None
         self._report = report
         self._plan = None
+        self._plan_error = None
         self._build()
         if self._thumbs_done:
             self.set_thumbnails(report.item.instance, {}, True)
@@ -759,24 +781,30 @@ class HouseholdView(QWidget):
 
     def show_plan_error(self, instance: int, reason: str, on_retry) -> None:
         if self._report is not None and self._report.item.instance == instance:
+            self._plan = None  # whatever plan was on screen is for older choices
+            self._plan_error = (reason, on_retry)
             self.hero.show_error(reason, on_retry)
 
     def set_plan(self, instance: int, plan: Plan, gameplay: list | None = None) -> None:
         if self._report is None or self._report.item.instance != instance:
             return
         self._plan = plan
+        self._plan_error = None
         if gameplay is not None:
             self._gameplay = gameplay
-        if self._sort == "size":
-            self._rebuild()  # the order depends on the sizes just worked out
+        if self._sort == "size" and self._size_rank is None:
+            self._rebuild()  # the first sizes: now the order can be worked out
         else:
             self._apply_plan()
 
     def plan_outdated(self) -> None:
-        """The choices changed; nothing may export the plan on screen until the new one."""
+        """The choices changed; nothing may export the plan on screen until the new one, and
+        its notices (with their Choose links) go until then."""
         self._plan = None
+        self._plan_error = None
         if self._report is not None:
             self.hero.show_working()
+            self._clear_notices("plan")
 
     def _owner_sizes(self) -> dict[TrayRef, int]:
         sizes: dict[TrayRef, int] = {}
@@ -788,6 +816,8 @@ class HouseholdView(QWidget):
     def _apply_plan(self) -> None:
         plan = self._plan
         if plan is None:
+            if self._plan_error is not None:
+                self.hero.show_error(*self._plan_error)
             return
         self.hero.show_plan(plan)
         self._fill_plan_notices()
@@ -816,19 +846,20 @@ class HouseholdView(QWidget):
         return set(self._thumbs)
 
     def set_names(self, instance: int, names: dict[TrayRef, ItemName]) -> None:
-        """Item names read from their packages arrive after the report is shown."""
+        """Item names read from their packages arrive after the report is shown; the page is
+        built again so every sort uses them."""
         self._names.update(names)
-        if self._report is None or self._report.item.instance != instance:
-            return
-        if self._mode == "list" or self._sort == "name":
+        if self._report is not None and self._report.item.instance == instance and names:
             self._rebuild()
-            return
-        for card in self._all_cards:
-            card.set_name(self._names.get(card.ref.ref))
-        self._apply_filter()
 
-    def known_names(self) -> set[TrayRef]:
-        return set(self._names)
+    def forget_names(self) -> None:
+        """The Mods folder changed: names may have too."""
+        self._names.clear()
+
+    def set_pictures(self, pictures: dict[int, QImage]) -> None:
+        self._pictures.update(pictures)
+        if self._report is not None and self._report.item.instance in pictures:
+            self._rebuild()
 
     def current_item(self) -> TrayItem | None:
         return self._report.item if self._report else None
@@ -845,9 +876,6 @@ class HouseholdView(QWidget):
         position."""
         if not self._theme_timer.isActive():
             self._theme_timer.start()
-
-    def _rebuild_for_theme(self) -> None:
-        self._rebuild()
 
     def _rebuild(self) -> None:
         """Build the page again (theme, view, sort or names changed), keeping the scroll
@@ -879,14 +907,23 @@ class HouseholdView(QWidget):
                                SPACE["xxl"] + SPACE["s"], SPACE["xxl"])
         col.setSpacing(0)
 
-        col.addWidget(label(r.item.name or f"Unnamed {r.noun}", "headline", wrap=True))
-        col.addSpacing(SPACE["m"])
+        head = QHBoxLayout()
+        head.setSpacing(SPACE["l"])
+        picture = self._pictures.get(r.item.instance)
+        if picture is not None:
+            head.addWidget(Picture(picture, 150), 0, Qt.AlignmentFlag.AlignTop)
+        titles = QVBoxLayout()
+        titles.setSpacing(0)
+        head.addLayout(titles, 1)
+        col.addLayout(head)
+        titles.addWidget(label(r.item.name or f"Unnamed {r.noun}", "headline", wrap=True))
+        titles.addSpacing(SPACE["m"])
         sims = r.contents.sims
         names = {s.sim.sim_id: s.sim.name or "Unnamed Sim" for s in sims}
         if r.noun != "household":
             self._chips = []
             line = item_subtitle(r.item, with_price=True)
-            col.addWidget(label(f"{r.noun.capitalize()} \u00b7 {line}" if line
+            titles.addWidget(label(f"{r.noun.capitalize()} \u00b7 {line}" if line
                                 else r.noun.capitalize(), "secondary"))
         elif len(sims) > 1:
             row = QHBoxLayout()
@@ -900,11 +937,11 @@ class HouseholdView(QWidget):
                 self._chips.append(chip)
                 row.addWidget(chip)
             row.addStretch(1)
-            col.addLayout(row)
+            titles.addLayout(row)
         else:
             self._chips = []
             if sims:
-                col.addWidget(label(names[sims[0].sim.sim_id], "secondary"))
+                titles.addWidget(label(names[sims[0].sim.sim_id], "secondary"))
 
         col.addSpacing(SPACE["xl"])
         self.hero = Hero(self.export_requested.emit, r.noun)
@@ -939,7 +976,7 @@ class HouseholdView(QWidget):
         if summary.cc:
             tools = QHBoxLayout()
             tools.setSpacing(SPACE["m"])
-            search = QLineEdit(self._query)
+            search = QLineEdit(self._query)  # as typed, trailing space and all
             search.setPlaceholderText("Search names and packages")
             search.setAccessibleName("Search the CC")
             search.setClearButtonEnabled(True)
@@ -996,8 +1033,13 @@ class HouseholdView(QWidget):
 
     def _sorted_groups(self, refs: list[LocatedRef]) -> list[tuple[str, list[LocatedRef]]]:
         if self._sort == "size":
-            sizes = self._owner_sizes()
-            ordered = sorted(refs, key=lambda x: (-sizes.get(x.ref, 0),
+            if self._size_rank is None and self._plan is not None:
+                sizes = self._owner_sizes()
+                ranked = sorted(refs, key=lambda x: (-sizes.get(x.ref, 0),
+                                                     self._title(x).casefold()))
+                self._size_rank = {x.ref: i for i, x in enumerate(ranked)}
+            rank = self._size_rank or {}
+            ordered = sorted(refs, key=lambda x: (rank.get(x.ref, len(rank)),
                                                   self._title(x).casefold()))
             return [("Largest first", ordered)]
         if self._sort == "name":
@@ -1005,7 +1047,7 @@ class HouseholdView(QWidget):
         return self._groups(refs, self._title)
 
     def _matches(self, ref: LocatedRef) -> bool:
-        if not self._query:
+        if not self._query.strip():
             return True
         name = self._names.get(ref.ref)
         haystack = " ".join([self._title(ref), name.creator if name else "",
@@ -1014,7 +1056,7 @@ class HouseholdView(QWidget):
         return all(word in haystack for word in self._query.casefold().split())
 
     def _query_changed(self, text: str) -> None:
-        self._query = text.strip()
+        self._query = text
         self._apply_filter()
 
     def _apply_filter(self) -> None:
@@ -1033,10 +1075,11 @@ class HouseholdView(QWidget):
                     matching += ok
                 section.show_matching(matching)
                 shown += matching
-        self.match_label.setText(f"{shown} of {total}" if self._query else "")
+        query = self._query.strip()
+        self.match_label.setText(f"{shown} of {total}" if query else "")
         self.no_match.setText(f"Nothing matches \u201c{self._query}\u201d. Search looks at "
                               "names, creators and packages.")
-        self.no_match.setVisible(bool(self._query) and shown == 0)
+        self.no_match.setVisible(bool(query) and shown == 0)
 
     def _sort_toggle(self) -> QWidget:
         box = QWidget()
@@ -1060,6 +1103,7 @@ class HouseholdView(QWidget):
     def _set_sort(self, key: str) -> None:
         if key != self._sort and self._report is not None:
             self._sort = key
+            self._size_rank = None  # choosing Size orders by the sizes as they are now
             self._rebuild()
 
     @staticmethod
@@ -1103,14 +1147,19 @@ class HouseholdView(QWidget):
         for res in group:
             for hit in reversed(res.copies):
                 packages.setdefault(hit.path, hit.rel)
-        default = group[0].copies[-1].path
+        chosen = any(res.chosen for res in group)
         current = {res.copy.path for res in group}
         menu = QMenu(self)
+        game = menu.addAction("What the game loads (the copy that loads last, file by file)")
+        game.setCheckable(True)
+        game.setChecked(not chosen)
+        game.triggered.connect(
+            lambda: self.copies_chosen.emit({res.key: None for res in group}))
+        menu.addSeparator()
         for path, rel in packages.items():
-            text = rel + ("  (the game uses this one)" if path == default else "")
-            action = menu.addAction(text)
+            action = menu.addAction(rel)
             action.setCheckable(True)
-            action.setChecked(current == {path})
+            action.setChecked(chosen and current == {path})
             action.triggered.connect(lambda _c=False, p=path: self._pick_package(group, p))
         menu.exec(button.mapToGlobal(button.rect().bottomLeft()) if button is not None
                   else QCursor.pos())
@@ -1172,8 +1221,8 @@ class HouseholdView(QWidget):
                 actions=[("Copy list", lambda b: self._copy_to_clipboard(lines, b))]), "tray")
         if r.overrides:
             n = len(r.overrides)
-            details = [(item_label(x), package_name(x), x.used.rel if x.used else "")
-                       for x in s.cc if x.ref in r.overrides]
+            details = [(item_label(x), display_name(x, self._names.get(x.ref)),
+                        x.used.rel if x.used else "") for x in s.cc if x.ref in r.overrides]
             self._add_notice(Notice(
                 "info", "text_secondary",
                 f"Your mods change {plural(n, 'EA item')} this {r.noun} uses",

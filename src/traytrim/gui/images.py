@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QImage
 
-from traytrim import dbpf
+from traytrim import dbpf, tray
 from traytrim.index import ResourceIndex
 
 # Sim portraits in the game's localthumbcache.package: type observed on real data (the cached
@@ -23,6 +23,24 @@ def _decode(data: bytes, size: int) -> QImage | None:
         return None
     return image.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
                         Qt.TransformationMode.SmoothTransformation)
+
+
+def load_tray_pictures(items: list[tray.TrayItem], width: int) -> dict[int, QImage]:
+    """Each tray item's own picture (household, lot or room), by item instance, scaled to
+    `width` pixels wide."""
+    out: dict[int, QImage] = {}
+    for item in items:
+        path = tray.picture_file(item)
+        if path is None:
+            continue
+        try:
+            image = QImage.fromData(tray.read_tray_picture(path))
+        except tray.TrayError:
+            continue
+        if not image.isNull():
+            out[item.instance] = image.scaledToWidth(
+                width, Qt.TransformationMode.SmoothTransformation)
+    return out
 
 
 def load_portraits(user_dir: Path, sim_ids: set[int], size: int) -> dict[int, QImage]:

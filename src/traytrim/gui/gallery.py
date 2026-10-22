@@ -24,7 +24,8 @@ class TrayModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.items: list[TrayItem] = []
-        self.portraits: dict[int, QImage] = {}
+        self.portraits: dict[int, QImage] = {}  # Sim id -> face
+        self.pictures: dict[int, QImage] = {}   # tray item -> its own picture
 
     def set_items(self, items: list[TrayItem]) -> None:
         self.beginResetModel()
@@ -36,9 +37,17 @@ class TrayModel(QAbstractListModel):
         if self.items:
             self.dataChanged.emit(self.index(0), self.index(len(self.items) - 1))
 
+    def set_pictures(self, pictures: dict[int, QImage]) -> None:
+        self.pictures.update(pictures)
+        if self.items:
+            self.dataChanged.emit(self.index(0), self.index(len(self.items) - 1))
+
     def portrait_for(self, item: TrayItem) -> QImage | None:
-        return next((self.portraits[s.sim_id] for s in item.sims if s.sim_id in self.portraits),
+        """A Sim's face for a household (it reads better at this size than the family
+        picture), else the item's own picture."""
+        face = next((self.portraits[s.sim_id] for s in item.sims if s.sim_id in self.portraits),
                     None)
+        return face or self.pictures.get(item.instance)
 
     def rowCount(self, parent=QModelIndex()) -> int:  # noqa: N802
         return 0 if parent.isValid() else len(self.items)
@@ -134,8 +143,8 @@ class TrayDelegate(QStyledItemDelegate):
         art = QRectF(x, rect.top() + SPACE["s"], PORTRAIT, PORTRAIT)
         clip = QPainterPath()
         clip.addRoundedRect(art, RADIUS["control"], RADIUS["control"])
-        image = model.portrait_for(item) if item.type == tray.ITEM_HOUSEHOLD else None
-        if item.type != tray.ITEM_HOUSEHOLD:
+        image = model.portrait_for(item)
+        if image is None and item.type != tray.ITEM_HOUSEHOLD:
             painter.setPen(Qt.PenStyle.NoPen)
             painter.setBrush(QColor(p.surface_hover if not selected else p.window))
             painter.drawPath(clip)
@@ -148,7 +157,7 @@ class TrayDelegate(QStyledItemDelegate):
             painter.setClipPath(clip)
             src = QRectF(0, 0, image.width(), image.height())
             side = min(src.width(), src.height())
-            src = QRectF((src.width() - side) / 2, 0, side, side)  # keep the face, crop sides
+            src = QRectF((src.width() - side) / 2, 0, side, side)  # keep the top, crop sides
             painter.drawImage(art, image, src)
             painter.setClipping(False)
         else:
