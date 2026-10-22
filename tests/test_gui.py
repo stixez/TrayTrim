@@ -114,3 +114,34 @@ def test_batch_dialog_picking(app, tmp_path):
     assert dialog.count_label.text() == "3 of 3 selected"
     dialog._set_all(False)
     assert not dialog.export_button.isEnabled() and dialog.count_label.text() == "3 lots"
+
+
+def test_detail_view_search_sort_and_names(app, tmp_path):
+    from test_plan import located, world  # noqa: F401
+    from traytrim.gui.household_view import HouseholdReport, HouseholdView
+    from traytrim.names import ItemName
+    from traytrim.tray import HouseholdContents, RefKind, SimContents
+
+    gen = world.__wrapped__(tmp_path)
+    index, k = next(gen)
+    refs = [located(index, RefKind.CAS_PART, k["hair"]),
+            located(index, RefKind.CAS_PART, k["recolor"])]
+    for r in refs:
+        r.usage = {1: {"Everyday outfit 1"}}
+        r.names = {1: "Camille Moreau"}
+    contents = HouseholdContents("Moreau", [SimContents(TraySim(1, "Camille", "Moreau"))], 2)
+    view = HouseholdView()
+    view.show_report(HouseholdReport(TrayItem(5, 1, "Moreau"), contents, refs, {1}))
+    assert len(view._all_cards) == 2
+    view.set_names(5, {refs[0].ref: ItemName("Long Waves", "Me", "Me_yfHair_LongWaves")})
+    assert view._all_cards[0].title._text == "Long Waves"
+    view._search.setText("waves")
+    assert [c.isHidden() for c in view._all_cards] == [False, True]
+    assert view.match_label.text() == "1 of 2"
+    view._search.setText("nothing like this")
+    assert view.no_match.isVisibleTo(view)
+    view._search.setText("")
+    view._set_sort("name")
+    assert [c.title._text for c in view._all_cards] == ["Long Waves", "recolor"]
+    view.deleteLater()
+    next(gen, None)

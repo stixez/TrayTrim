@@ -44,6 +44,7 @@ class PlannedResource:
     owner: TrayRef                   # the tray item that first needed it
     parents: set[ResourceKey] = field(default_factory=set)
     conflict: bool = False           # copies with different content
+    chosen: bool = False             # the user picked `copy` instead of the one loading last
     default_replacement: bool = False  # EA resource replaced by a mod
 
     @property
@@ -156,8 +157,12 @@ def open_packages() -> Iterator[_Packages]:
 
 def build_plan(refs: list[LocatedRef], index: ResourceIndex,
                excluded: set[TrayRef] | None = None, progress: Progress | None = None,
-               cancel: threading.Event | None = None) -> Plan:
+               cancel: threading.Event | None = None,
+               copies_chosen: dict[ResourceKey, Path] | None = None) -> Plan:
+    """What an export holds. Of several copies of a resource the one the game loads last is
+    taken, unless copies_chosen names another package for that resource."""
     excluded = set(excluded or ())
+    copies_chosen = copies_chosen or {}
     plan = Plan(refs, excluded)
     packages = _Packages()
     queue: deque[tuple[ResourceKey, TrayRef, ResourceKey | None, str]] = deque()
@@ -206,9 +211,11 @@ def build_plan(refs: list[LocatedRef], index: ResourceIndex,
                 plan.from_game[key] = {h.pack for h in game}
                 plan.overridden[key] = copies[-1]
                 continue
-            item = PlannedResource(key, copies[-1], copies, via, owner,
+            chosen = next((h for h in copies if h.path == copies_chosen.get(key)), None)
+            item = PlannedResource(key, chosen or copies[-1], copies, via, owner,
                                    {parent} if parent else set(),
-                                   default_replacement=bool(game))
+                                   default_replacement=bool(game),
+                                   chosen=chosen is not None and chosen is not copies[-1])
             if len(copies) > 1:
                 item.conflict = _contents_differ(copies, packages, plan)
             plan.resources[key] = item

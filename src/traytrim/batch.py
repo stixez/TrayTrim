@@ -1,13 +1,17 @@
-"""Exporting tray items without the app's detail view: prepare one (read, locate, plan) with the
-same defaults the app starts from, or export several in a row, one zip each."""
+"""The steps from a tray item to an export, shared by the app, batch export and the CLI, so
+they all start from the same defaults: locate what an item uses, scope it to the chosen Sims,
+plan it with what's left out and which copies are used. Plus exporting several in a row, one
+zip each."""
 
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable
 
 from traytrim import tray
+from traytrim.dbpf import ResourceKey
 from traytrim.errors import describe_error
 from traytrim.export import ExportOptions, ExportResult, default_base_name, export_household
 from traytrim.index import ResourceIndex
@@ -15,6 +19,38 @@ from traytrim.plan import Cancelled, Plan, build_plan
 from traytrim.resolve import (GameplayMod, LocatedRef, default_excluded, for_sims,
                               gameplay_mods, locate)
 from traytrim.tray import HouseholdContents, TrayItem, TrayRef
+
+
+@dataclass
+class Located:
+    """What a tray item uses, for all of its Sims, before any choice."""
+    item: TrayItem
+    contents: HouseholdContents
+    refs: list[LocatedRef]
+    start_excluded: set[TrayRef]  # left out until the user includes them
+
+    @property
+    def sim_ids(self) -> set[int]:
+        return {s.sim.sim_id for s in self.contents.sims}
+
+
+def locate_item(item: TrayItem, index: ResourceIndex) -> Located:
+    contents = tray.read_contents(item)
+    refs = locate(contents, index)
+    return Located(item, contents, refs, default_excluded(contents, refs))
+
+
+def scoped_refs(located: Located, sim_ids: set[int]) -> list[LocatedRef]:
+    """The references of just these Sims (all of them when every Sim is chosen)."""
+    return located.refs if sim_ids >= located.sim_ids else for_sims(located.refs, sim_ids)
+
+
+def plan_refs(contents: HouseholdContents, refs: list[LocatedRef], sim_ids: set[int],
+              excluded: set[TrayRef], copies: dict[ResourceKey, Path], index: ResourceIndex,
+              progress: Callable[[int, int], None] | None = None,
+              cancel: threading.Event | None = None) -> tuple[Plan, list[GameplayMod]]:
+    plan = build_plan(refs, index, excluded, progress, cancel, copies)
+    return plan, gameplay_mods(contents, index, sim_ids)
 
 
 @dataclass
@@ -33,6 +69,7 @@ class Choice:
     """What the user picked for one item in the app; None means the defaults."""
     sim_ids: set[int] | None = None
     excluded: set[TrayRef] | None = None
+    copies: dict[ResourceKey, Path] = field(default_factory=dict)  # resource -> package used
 
 
 def prepare(item: TrayItem, index: ResourceIndex, choice: Choice | None = None,
@@ -41,19 +78,15 @@ def prepare(item: TrayItem, index: ResourceIndex, choice: Choice | None = None,
     """Everything an export of `item` needs. Defaults: every Sim of a household, and for lots
     and rooms the EA objects changed by mods left out (see resolve.default_excluded)."""
     choice = choice or Choice()
-    contents = tray.read_contents(item)
-    all_ids = {s.sim.sim_id for s in contents.sims}
+    located = locate_item(item, index)
+    all_ids = located.sim_ids
     sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
-    refs = locate(contents, index)
-    # Defaults from every Sim's references, as the app's detail view works them out.
-    excluded = (choice.excluded if choice.excluded is not None
-                else default_excluded(contents, refs))
-    if sim_ids != all_ids:
-        refs = for_sims(refs, sim_ids)
-    plan = build_plan(refs, index, excluded, progress, cancel)
-    gameplay = gameplay_mods(contents, index, sim_ids)
-    return Prepared(item, contents, refs, plan, gameplay, sim_ids,
-                    default_base_name(item, contents, sim_ids))
+    refs = scoped_refs(located, sim_ids)
+    excluded = choice.excluded if choice.excluded is not None else located.start_excluded
+    plan, gameplay = plan_refs(located.contents, refs, sim_ids, excluded, choice.copies, index,
+                               progress, cancel)
+    return Prepared(item, located.contents, refs, plan, gameplay, sim_ids,
+                    default_base_name(item, located.contents, sim_ids))
 
 
 def export_prepared(p: Prepared, options: ExportOptions, index: ResourceIndex,

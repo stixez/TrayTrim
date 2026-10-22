@@ -53,6 +53,9 @@ class FlowLayout(QLayout):
         area = rect.adjusted(m.left(), m.top(), -m.right(), -m.bottom())
         x, y, line_height = area.x(), area.y(), 0
         for item in self._items:
+            widget = item.widget()
+            if widget is not None and widget.isHidden():
+                continue  # filtered out: takes no room
             hint = item.sizeHint()
             if x + hint.width() > area.right() + 1 and line_height > 0:
                 x = area.x()

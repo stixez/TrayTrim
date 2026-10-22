@@ -6,18 +6,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QColor, QCursor, QFont, QGuiApplication, QImage, QPainter,
+                           QPainterPath, QPen)
 from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QGraphicsOpacityEffect,
-                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QProgressBar,
-                               QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMenu,
+                               QProgressBar, QPushButton, QScrollArea, QSizePolicy,
+                               QStackedWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
+                               QWidget)
 
 from traytrim import restypes
 from traytrim.gui import icons, theme
 from traytrim.gui.flow import FlowLayout
 from traytrim.gui.theme import RADIUS, SPACE
 from traytrim.gui.widgets import ClampedText, label, link_button, set_role
-from traytrim.plan import Plan
+from traytrim.names import ItemName
+from traytrim.plan import Plan, PlannedResource
 from traytrim.resolve import LocatedRef, Summary, ref_label, summarize
 from traytrim.tray import HouseholdContents, RefKind, TrayItem, TrayRef
 from traytrim.units import human_size, percent_smaller
@@ -42,6 +45,7 @@ class HouseholdReport:
     sim_ids: set[int]
     excluded: set[TrayRef] = field(default_factory=set)
     overrides: set[TrayRef] = field(default_factory=set)  # left out unless the user opts in
+    copies: dict = field(default_factory=dict)  # ResourceKey -> package path the user chose
 
     @property
     def noun(self) -> str:
@@ -76,6 +80,11 @@ def card_caption(ref: LocatedRef) -> str:
 
 def package_name(ref: LocatedRef) -> str:
     return Path(ref.used.rel).stem if ref.used else ""
+
+
+def display_name(ref: LocatedRef, name: ItemName | None) -> str:
+    """The item's own name when its package has one, else the package it's in."""
+    return name.title if name is not None and name.title else package_name(ref)
 
 
 def usage_text(ref: LocatedRef) -> str:
@@ -246,9 +255,11 @@ class CcCard(QFrame):
 
     toggled = Signal(object, bool)  # TrayRef, included
 
-    def __init__(self, ref: LocatedRef, included: bool, parent=None):
+    def __init__(self, ref: LocatedRef, included: bool, name: ItemName | None = None,
+                 parent=None):
         super().__init__(parent)
         self.ref = ref
+        self.name = name
         self._included = included
         self.setObjectName("ccCard")
         self.setFixedWidth(CARD_WIDTH)
@@ -268,7 +279,8 @@ class CcCard(QFrame):
         col.addWidget(self.thumb)
         col.addSpacing(SPACE["xs"])
         col.addWidget(label(card_caption(ref), "caption"))
-        col.addWidget(ClampedText(package_name(ref), 2))
+        self.title = ClampedText(display_name(ref, name), 2)
+        col.addWidget(self.title)
         foot = QHBoxLayout()
         foot.setContentsMargins(0, SPACE["xs"], 0, 0)
         foot.setSpacing(SPACE["xs"])
@@ -306,9 +318,23 @@ class CcCard(QFrame):
     def set_size(self, size: int | None) -> None:
         self.size_label.setText(human_size(size) if size else "")
 
+    def set_name(self, name: ItemName | None) -> None:
+        if name is not None and name != self.name:
+            self.name = name
+            self.title.set_text(display_name(self.ref, name))
+            self._apply()
+            self._set_tooltip()
+
     def _set_tooltip(self) -> None:
         r = self.ref
-        lines = [r.used.rel if r.used else ""]
+        lines = []
+        if self.name is not None:
+            lines.append(self.name.title + (f" by {self.name.creator}" if self.name.creator
+                                            else ""))
+            if self.name.raw and self.name.raw != self.name.title:
+                lines.append(self.name.raw)
+            lines.append("")
+        lines.append(r.used.rel if r.used else "")
         if len(r.mods) > 1:
             lines += ["", "Also in:"] + [h.rel for h in r.mods[:-1]]
             lines += ["", "The game uses the copy that loads last (alphabetical order in Mods)."]
@@ -327,7 +353,7 @@ class CcCard(QFrame):
         self.style().polish(self)
         verb = "Included in" if self._included else "Left out of"
         approx = " Approximate match." if self.ref.approximate else ""
-        self.setAccessibleName(f"{item_label(self.ref)}, {package_name(self.ref)}. "
+        self.setAccessibleName(f"{item_label(self.ref)}, {display_name(self.ref, self.name)}. "
                                f"{verb} the export.{approx}")
 
     def toggle(self) -> None:
@@ -354,12 +380,13 @@ class Section(QWidget):
         super().__init__(parent)
         self.cards = cards
         col = QVBoxLayout(self)
-        col.setContentsMargins(0, 0, 0, 0)
+        col.setContentsMargins(0, 0, 0, SPACE["xl"])
         col.setSpacing(SPACE["m"])
         head = QHBoxLayout()
         head.setSpacing(SPACE["s"])
         head.addWidget(label(title, "title"))
-        head.addWidget(label(str(len(cards)), "secondary"), 0, Qt.AlignmentFlag.AlignBaseline)
+        self.count_label = label(str(len(cards)), "secondary")
+        head.addWidget(self.count_label, 0, Qt.AlignmentFlag.AlignBaseline)
         head.addStretch(1)
         self.size_label = label("", "secondary")
         head.addWidget(self.size_label, 0, Qt.AlignmentFlag.AlignBaseline)
@@ -374,12 +401,23 @@ class Section(QWidget):
     def set_size(self, size: int | None) -> None:
         self.size_label.setText(human_size(size) if size else "")
 
+    def show_matching(self, matching: int) -> None:
+        self.setVisible(matching > 0)
+        n = len(self.cards)
+        self.count_label.setText(str(n) if matching == n else f"{matching} of {n}")
+
 
 class Notice(QWidget):
-    """A calm, one-line notice with an icon, and details that open on request."""
+    """A calm, one-line notice with an icon, and details that open on request.
+
+    A detail row is (item, info, tooltip) or (item, info, tooltip, (link text, callback));
+    `actions` are links next to Show, like Copy list. `expanded` and `on_expand` let the view
+    keep the details open when the notice is rebuilt."""
 
     def __init__(self, icon_name: str, token: str, title: str, body: str,
-                 details: list[tuple[str, str, str]] | None = None, parent=None):
+                 details: list[tuple] | None = None,
+                 actions: list[tuple[str, object]] | None = None, expanded: bool = False,
+                 on_expand=None, parent=None):
         super().__init__(parent)
         outer = QHBoxLayout(self)
         outer.setContentsMargins(0, SPACE["m"], 0, SPACE["m"])
@@ -400,20 +438,34 @@ class Notice(QWidget):
             grid.setHorizontalSpacing(SPACE["l"])
             grid.setVerticalSpacing(SPACE["xs"])
             grid.setColumnStretch(1, 1)
-            for i, (what, info, tip) in enumerate(details):
+            for i, (what, info, tip, *action) in enumerate(details):
                 a, b = label(what, "detailItem"), label(info, "secondary", wrap=True)
                 a.setToolTip(tip)
                 b.setToolTip(tip)
                 grid.addWidget(a, i, 0, Qt.AlignmentFlag.AlignTop)
                 grid.addWidget(b, i, 1)
-            box.hide()
+                if action:
+                    text, callback = action[0]
+                    link = link_button(text)
+                    link.setAccessibleName(f"{text}: {what}, {info}")
+                    link.clicked.connect(lambda _c=False, f=callback, w=link: f(w))
+                    grid.addWidget(link, i, 2, Qt.AlignmentFlag.AlignTop)
+            box.setVisible(expanded)
             col.addWidget(box)
-            toggle = link_button("Show")
+        for text, callback in actions or []:
+            link = link_button(text)
+            link.setAccessibleName(f"{text}: {title}")
+            link.clicked.connect(lambda _c=False, f=callback, w=link: f(w))
+            head.addWidget(link, 0, Qt.AlignmentFlag.AlignTop)
+        if details:
+            toggle = link_button("Hide" if expanded else "Show")
             toggle.setAccessibleName(f"Show details: {title}")
 
             def flip() -> None:
                 box.setVisible(not box.isVisible())
                 toggle.setText("Hide" if box.isVisible() else "Show")
+                if on_expand is not None:
+                    on_expand(box.isVisible())
 
             toggle.clicked.connect(flip)
             head.addWidget(toggle, 0, Qt.AlignmentFlag.AlignTop)
@@ -519,11 +571,13 @@ class Hero(QWidget):
 
 
 class CcList(QTreeWidget):
+    COLUMNS = 5
+
     def __init__(self, groups: list[tuple[str, list[LocatedRef]]], with_names: bool,
-                 excluded: set[TrayRef], parent=None):
+                 excluded: set[TrayRef], names: dict[TrayRef, ItemName], parent=None):
         super().__init__(parent)
-        self.setColumnCount(4)
-        self.setHeaderLabels(["Item", "Package", "Used in", "Notes"])
+        self.setColumnCount(self.COLUMNS)
+        self.setHeaderLabels(["Item", "Name", "Package", "Used in", "Notes"])
         self.setRootIsDecorated(True)
         self.setUniformRowHeights(True)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -531,15 +585,19 @@ class CcList(QTreeWidget):
         header.setStretchLastSection(False)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        self.setColumnWidth(2, 240 if with_names else 180)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.setColumnWidth(3, 240 if with_names else 180)
         bold = theme.ui_font("body", QFont.Weight.DemiBold)
         dim = QColor(theme.current().text_tertiary)
+        self.rows: list[tuple[QTreeWidgetItem, LocatedRef]] = []
+        self.tops: list[tuple[QTreeWidgetItem, str, int]] = []
         for title, refs in groups:
             top = QTreeWidgetItem([f"{title} ({len(refs)})"])
             top.setFont(0, bold)
             self.addTopLevelItem(top)
+            self.tops.append((top, title, len(refs)))
             for r in refs:
                 notes = []
                 if r.ref in excluded:
@@ -548,14 +606,19 @@ class CcList(QTreeWidget):
                     notes.append(f"{len(r.mods)} copies in Mods")
                 if r.approximate:
                     notes.append("Approximate match")
-                child = QTreeWidgetItem([item_label(r), r.used.rel if r.used else "",
+                name = names.get(r.ref)
+                child = QTreeWidgetItem([item_label(r), name.title if name else "",
+                                         r.used.rel if r.used else "",
                                          usage_summary(r, with_names), ", ".join(notes)])
-                child.setToolTip(1, r.used.rel if r.used else "")
-                child.setToolTip(2, usage_text(r))
+                if name is not None and name.raw != name.title:
+                    child.setToolTip(1, name.raw)
+                child.setToolTip(2, r.used.rel if r.used else "")
+                child.setToolTip(3, usage_text(r))
                 if r.ref in excluded:
-                    for c in range(4):
+                    for c in range(self.COLUMNS):
                         child.setForeground(c, dim)
                 top.addChild(child)
+                self.rows.append((child, r))
             top.setExpanded(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -563,12 +626,33 @@ class CcList(QTreeWidget):
         self.itemCollapsed.connect(self._fit_height)
         self._fit_height()
 
+    def show_matching(self, matches) -> int:
+        """Hide the rows `matches(ref)` rejects, and groups left empty. Returns rows shown."""
+        shown = 0
+        visible: dict[int, int] = {}
+        for child, r in self.rows:
+            ok = matches(r)
+            child.setHidden(not ok)
+            if ok:
+                shown += 1
+                parent = child.parent()
+                visible[id(parent)] = visible.get(id(parent), 0) + 1
+        for top, title, n in self.tops:
+            k = visible.get(id(top), 0)
+            top.setHidden(k == 0)
+            top.setText(0, f"{title} ({n})" if k == n else f"{title} ({k} of {n})")
+        self._fit_height()
+        return shown
+
     def _fit_height(self, *_args) -> None:
         """Tall enough for every visible row, so the page scrolls instead of a box inside it."""
         rows = 0
         for i in range(self.topLevelItemCount()):
             top = self.topLevelItem(i)
-            rows += 1 + (top.childCount() if top.isExpanded() else 0)
+            if top.isHidden():
+                continue
+            children = sum(1 for j in range(top.childCount()) if not top.child(j).isHidden())
+            rows += 1 + (children if top.isExpanded() else 0)
         row_height = self.sizeHintForRow(0) if rows else 0
         self.setFixedHeight(self.header().sizeHint().height() + rows * row_height + 4)
 
@@ -578,13 +662,22 @@ class HouseholdView(QWidget):
 
     sims_changed = Signal(set)          # Sim ids to include
     exclusion_changed = Signal(set)     # TrayRefs left out of the export
+    copies_chosen = Signal(object)  # {ResourceKey: package Path, or None for the default}
     export_requested = Signal()
+
+    SORTS = (("category", "Category"), ("size", "Size"), ("name", "Name"))
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("content")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
         self._mode = "cards"
+        self._sort = "category"
+        self._query = ""
+        self._names: dict[TrayRef, ItemName] = {}
+        self._expanded: set[str] = set()  # notices whose details are open
+        self._search: QLineEdit | None = None
+        self._list: CcList | None = None
         self._report: HouseholdReport | None = None
         self._plan: Plan | None = None
         self._gameplay: list = []
@@ -650,6 +743,8 @@ class HouseholdView(QWidget):
         position = self.scroll.verticalScrollBar().value() if keep_scroll else 0
         if not keep_scroll:
             self._thumbs_done = False
+            self._query = ""
+            self._expanded.clear()
         self._report = report
         self._plan = None
         self._build()
@@ -672,11 +767,31 @@ class HouseholdView(QWidget):
         self._plan = plan
         if gameplay is not None:
             self._gameplay = gameplay
+        if self._sort == "size":
+            self._rebuild()  # the order depends on the sizes just worked out
+        else:
+            self._apply_plan()
+
+    def plan_outdated(self) -> None:
+        """The choices changed; nothing may export the plan on screen until the new one."""
+        self._plan = None
+        if self._report is not None:
+            self.hero.show_working()
+
+    def _owner_sizes(self) -> dict[TrayRef, int]:
+        sizes: dict[TrayRef, int] = {}
+        if self._plan is not None:
+            for res in self._plan.resources.values():
+                sizes[res.owner] = sizes.get(res.owner, 0) + res.size
+        return sizes
+
+    def _apply_plan(self) -> None:
+        plan = self._plan
+        if plan is None:
+            return
         self.hero.show_plan(plan)
         self._fill_plan_notices()
-        sizes: dict[TrayRef, int] = {}
-        for res in plan.resources.values():
-            sizes[res.owner] = sizes.get(res.owner, 0) + res.size
+        sizes = self._owner_sizes()
         for card in self._all_cards:
             card.set_size(sizes.get(card.ref.ref) if card.included else None)
         for section in self._sections:
@@ -700,6 +815,21 @@ class HouseholdView(QWidget):
         """Items whose thumbnail is already loaded."""
         return set(self._thumbs)
 
+    def set_names(self, instance: int, names: dict[TrayRef, ItemName]) -> None:
+        """Item names read from their packages arrive after the report is shown."""
+        self._names.update(names)
+        if self._report is None or self._report.item.instance != instance:
+            return
+        if self._mode == "list" or self._sort == "name":
+            self._rebuild()
+            return
+        for card in self._all_cards:
+            card.set_name(self._names.get(card.ref.ref))
+        self._apply_filter()
+
+    def known_names(self) -> set[TrayRef]:
+        return set(self._names)
+
     def current_item(self) -> TrayItem | None:
         return self._report.item if self._report else None
 
@@ -717,16 +847,24 @@ class HouseholdView(QWidget):
             self._theme_timer.start()
 
     def _rebuild_for_theme(self) -> None:
+        self._rebuild()
+
+    def _rebuild(self) -> None:
+        """Build the page again (theme, view, sort or names changed), keeping the scroll
+        position, the plan on screen and the search box's focus."""
         if self._report is None:
             return
         position = self.scroll.verticalScrollBar().value()
-        plan = self._plan
+        searching = self._search is not None and self._search.hasFocus()
+        cursor = self._search.cursorPosition() if searching else 0
         self._build()
-        if plan is not None:
-            self.set_plan(self._report.item.instance, plan)
+        self._apply_plan()
         if self._thumbs_done:
             self.set_thumbnails(self._report.item.instance, {}, True)
         self.scroll.verticalScrollBar().setValue(position)
+        if searching and self._search is not None:
+            self._search.setFocus()
+            self._search.setCursorPosition(cursor)
 
     # Report
 
@@ -797,14 +935,40 @@ class HouseholdView(QWidget):
         col.addWidget(label(f"{self._source_line(summary)} {hint}", "secondary", wrap=True))
         col.addSpacing(SPACE["l"])
 
-        groups = self._groups(summary.cc)
+        self._search, self._list = None, None
+        if summary.cc:
+            tools = QHBoxLayout()
+            tools.setSpacing(SPACE["m"])
+            search = QLineEdit(self._query)
+            search.setPlaceholderText("Search names and packages")
+            search.setAccessibleName("Search the CC")
+            search.setClearButtonEnabled(True)
+            search.setFixedWidth(280)
+            search.addAction(icons.icon("search", theme.current().text_tertiary, 16),
+                             QLineEdit.ActionPosition.LeadingPosition)
+            search.textChanged.connect(self._query_changed)
+            self._search = search
+            tools.addWidget(search)
+            self.match_label = label("", "secondary")
+            tools.addWidget(self.match_label)
+            tools.addStretch(1)
+            tools.addWidget(label("Sort by", "secondary"))
+            tools.addWidget(self._sort_toggle())
+            col.addLayout(tools)
+            col.addSpacing(SPACE["l"])
+            self.no_match = label("", "secondary", wrap=True)
+            self.no_match.hide()
+            col.addWidget(self.no_match)
+
+        groups = self._sorted_groups(summary.cc)
         self._cards, self._all_cards, self._sections = {}, [], []
         if not summary.cc:
             col.addWidget(label(f"This {r.noun} doesn't use any CC from your Mods folder.",
                                 "secondary", wrap=True))
         elif self._mode == "cards":
             for title, refs in groups:
-                cards = [CcCard(x, x.ref not in r.excluded) for x in refs]
+                cards = [CcCard(x, x.ref not in r.excluded, self._names.get(x.ref))
+                         for x in refs]
                 for card in cards:
                     card.toggled.connect(self._card_toggled)
                     self._all_cards.append(card)
@@ -815,14 +979,88 @@ class HouseholdView(QWidget):
                 section = Section(title, cards)
                 self._sections.append(section)
                 col.addWidget(section)
-                col.addSpacing(SPACE["xl"])
         else:
-            col.addWidget(CcList(groups, len(r.sim_ids) > 1, r.excluded))
+            self._list = CcList(groups, len(r.sim_ids) > 1, r.excluded, self._names)
+            col.addWidget(self._list)
         col.addStretch(1)
         old = self.scroll.takeWidget()
         if old is not None:
             old.deleteLater()
         self.scroll.setWidget(page)
+        self._apply_filter()
+
+    # Search and sort
+
+    def _title(self, ref: LocatedRef) -> str:
+        return display_name(ref, self._names.get(ref.ref))
+
+    def _sorted_groups(self, refs: list[LocatedRef]) -> list[tuple[str, list[LocatedRef]]]:
+        if self._sort == "size":
+            sizes = self._owner_sizes()
+            ordered = sorted(refs, key=lambda x: (-sizes.get(x.ref, 0),
+                                                  self._title(x).casefold()))
+            return [("Largest first", ordered)]
+        if self._sort == "name":
+            return [("A to Z", sorted(refs, key=lambda x: self._title(x).casefold()))]
+        return self._groups(refs, self._title)
+
+    def _matches(self, ref: LocatedRef) -> bool:
+        if not self._query:
+            return True
+        name = self._names.get(ref.ref)
+        haystack = " ".join([self._title(ref), name.creator if name else "",
+                             name.raw if name else "", ref.used.rel if ref.used else "",
+                             item_label(ref), card_caption(ref)]).casefold()
+        return all(word in haystack for word in self._query.casefold().split())
+
+    def _query_changed(self, text: str) -> None:
+        self._query = text.strip()
+        self._apply_filter()
+
+    def _apply_filter(self) -> None:
+        if self._search is None:
+            return
+        total = len(self._summary.cc)
+        if self._list is not None:
+            shown = self._list.show_matching(self._matches)
+        else:
+            shown = 0
+            for section in self._sections:
+                matching = 0
+                for card in section.cards:
+                    ok = self._matches(card.ref)
+                    card.setVisible(ok)
+                    matching += ok
+                section.show_matching(matching)
+                shown += matching
+        self.match_label.setText(f"{shown} of {total}" if self._query else "")
+        self.no_match.setText(f"Nothing matches \u201c{self._query}\u201d. Search looks at "
+                              "names, creators and packages.")
+        self.no_match.setVisible(bool(self._query) and shown == 0)
+
+    def _sort_toggle(self) -> QWidget:
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        group = QButtonGroup(box)
+        for i, (key, text) in enumerate(self.SORTS):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(self._sort == key)
+            b.setProperty("kind", "segment")
+            b.setProperty("position", "first" if i == 0 else
+                          "last" if i == len(self.SORTS) - 1 else "middle")
+            b.setAccessibleName(f"Sort by {text.lower()}")
+            b.clicked.connect(lambda _c=False, k=key: self._set_sort(k))
+            group.addButton(b)
+            row.addWidget(b)
+        return box
+
+    def _set_sort(self, key: str) -> None:
+        if key != self._sort and self._report is not None:
+            self._sort = key
+            self._rebuild()
 
     @staticmethod
     def _source_line(s: Summary) -> str:
@@ -837,15 +1075,54 @@ class HouseholdView(QWidget):
         return " ".join(parts)
 
     @staticmethod
-    def _groups(refs: list[LocatedRef]) -> list[tuple[str, list[LocatedRef]]]:
+    def _groups(refs: list[LocatedRef], title=package_name) -> list[tuple[str, list[LocatedRef]]]:
         by_group: dict[str, list[LocatedRef]] = {}
         for ref in refs:
             by_group.setdefault(ref.ref.group, []).append(ref)
         order = {g: i for i, g in enumerate(GROUP_ORDER)}
-        return [(g, sorted(rs, key=lambda x: (item_label(x), package_name(x).casefold())))
+        return [(g, sorted(rs, key=lambda x: (item_label(x), title(x).casefold())))
                 for g, rs in sorted(by_group.items(), key=lambda kv: order.get(kv[0], 99))]
 
     # Notices
+
+    def _notice(self, key: str, *args, **kwargs) -> Notice:
+        """A notice whose details stay open across rebuilds once the user opened them."""
+        return Notice(*args, expanded=key in self._expanded,
+                      on_expand=lambda shown: (self._expanded.add(key) if shown
+                                               else self._expanded.discard(key)), **kwargs)
+
+    def _copy_to_clipboard(self, lines: list[str], button) -> None:
+        QGuiApplication.clipboard().setText("\n".join(lines) + "\n")
+        button.setText("Copied")
+        QTimer.singleShot(2000, lambda: _set_text_if_alive(button, "Copy list"))
+
+    def _choose_copy(self, group: list[PlannedResource], button) -> None:
+        """Pick the package an item's differing files come from: every package that holds a
+        copy of any of them, the game's own choice first."""
+        packages: dict[Path, str] = {}
+        for res in group:
+            for hit in reversed(res.copies):
+                packages.setdefault(hit.path, hit.rel)
+        default = group[0].copies[-1].path
+        current = {res.copy.path for res in group}
+        menu = QMenu(self)
+        for path, rel in packages.items():
+            text = rel + ("  (the game uses this one)" if path == default else "")
+            action = menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(current == {path})
+            action.triggered.connect(lambda _c=False, p=path: self._pick_package(group, p))
+        menu.exec(button.mapToGlobal(button.rect().bottomLeft()) if button is not None
+                  else QCursor.pos())
+        menu.deleteLater()
+
+    def _pick_package(self, group: list[PlannedResource], path: Path) -> None:
+        """Take each file from `path` where it has a copy; the rest keep the game's choice."""
+        picks = {}
+        for res in group:
+            has = any(h.path == path for h in res.copies)
+            picks[res.key] = path if has and res.copies[-1].path != path else None
+        self.copies_chosen.emit(picks)
 
     def _add_notice(self, notice: Notice, tag: str) -> None:
         notice.setProperty("phase", tag)
@@ -884,11 +1161,15 @@ class HouseholdView(QWidget):
                 looks = f"{r.noun} looks"
                 extra = (" Downloads from the gallery often use CC that doesn't come with "
                          "them.")
-            self._add_notice(Notice(
+            lines = [f"{item_label(x)}\t{x.ref.instance:016X}\t{usage_summary(x, True)}"
+                     for x in s.missing]
+            self._add_notice(self._notice(
+                "missing",
                 "alert", "danger_text",
                 f"{plural(n, 'item')} {'isn' if n == 1 else 'aren'}'t installed",
                 f"They're not in your Mods folder or in the game, so the {looks} different "
-                f"without them, here and in the export.{extra}", details), "tray")
+                f"without them, here and in the export.{extra}", details,
+                actions=[("Copy list", lambda b: self._copy_to_clipboard(lines, b))]), "tray")
         if r.overrides:
             n = len(r.overrides)
             details = [(item_label(x), package_name(x), x.used.rel if x.used else "")
@@ -910,26 +1191,49 @@ class HouseholdView(QWidget):
             return
         if plan.missing:
             n = len(plan.missing)
-            details = []
+            details, lines = [], []
             for key, needers in sorted(plan.missing.items(), key=lambda kv: str(kv[0])):
                 parents = ", ".join(sorted({restypes.name(p.type) for p in needers}))
                 details.append((restypes.name(key.type), f"Needed by: {parents}", str(key)))
-            self._add_notice(Notice(
+                lines.append(f"{restypes.name(key.type)}\t{key}\tneeded by "
+                             + ", ".join(str(p) for p in sorted(needers, key=str)))
+            self._add_notice(self._notice(
+                "missing-files",
                 "alert", "danger_text", f"{plural(n, 'file')} that CC needs "
                 f"{'is' if n == 1 else 'are'} missing",
                 "Some CC refers to meshes or textures that aren't in your Mods folder, often a "
                 "mesh that has to be downloaded separately. It already looks wrong in your game; "
-                "the export can't fix that.", details[:200]), "plan")
+                "the export can't fix that.", details[:200],
+                actions=[("Copy list", lambda b: self._copy_to_clipboard(lines, b))]), "plan")
         if plan.conflicts:
             n = len(plan.conflicts)
-            details = [(restypes.name(c.key.type),
-                        f"uses {Path(c.copy.rel).name} ({len(c.copies)} different copies)",
-                        "\n".join(h.rel for h in c.copies)) for c in plan.conflicts]
-            self._add_notice(Notice(
+            by_owner: dict[TrayRef, list[PlannedResource]] = {}
+            for c in plan.conflicts:
+                by_owner.setdefault(c.owner, []).append(c)
+            located = {x.ref: x for x in self._report.refs}
+            details = []
+            for owner, group in by_owner.items():
+                ref = located.get(owner)
+                what = (display_name(ref, self._names.get(owner)) if ref is not None
+                        else ref_label(owner))
+                used = sorted({Path(c.copy.rel).name for c in group})
+                files = plural(len(group), "file")
+                details.append((
+                    what, f"uses {', '.join(used)}"
+                    + (" (your choice)" if any(c.chosen for c in group) else "")
+                    + f" \u00b7 {files} with different copies",
+                    "\n".join(f"{restypes.name(c.key.type)} {c.key}: "
+                              + ", ".join(h.rel for h in c.copies) for c in group),
+                    ("Choose", lambda b, g=group: self._choose_copy(g, b))))
+            chosen = sum(1 for g in by_owner.values() if any(c.chosen for c in g))
+            self._add_notice(self._notice(
+                "conflicts",
                 "copies", "warning_text",
                 f"{plural(n, 'file')} {'has' if n == 1 else 'have'} different copies in Mods",
                 "TrayTrim takes the copy the game uses: the one that loads last, in "
-                "alphabetical order of its path in Mods.", details), "plan")
+                "alphabetical order of its path in Mods. Choose another copy if you know it's "
+                "the right one." + (f" You chose {chosen}." if chosen else ""), details),
+                "plan")
         if plan.default_replacements:
             n = len(plan.default_replacements)
             details = [(restypes.name(d.key.type), Path(d.copy.rel).name, str(d.key))
@@ -999,10 +1303,7 @@ class HouseholdView(QWidget):
     def _set_mode(self, mode: str) -> None:
         if mode != self._mode and self._report is not None:
             self._mode = mode
-            plan = self._plan
-            self._build()
-            if plan is not None:
-                self.set_plan(self._report.item.instance, plan)
+            self._rebuild()
 
     def _chip_toggled(self) -> None:
         chosen = {c.property("sim_id") for c in self._chips if c.isChecked()}
@@ -1031,3 +1332,10 @@ class HouseholdView(QWidget):
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(800, 600)
+
+
+def _set_text_if_alive(button, text: str) -> None:
+    try:
+        button.setText(text)
+    except RuntimeError:  # the notice was rebuilt meanwhile
+        pass

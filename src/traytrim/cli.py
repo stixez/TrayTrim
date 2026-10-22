@@ -172,6 +172,7 @@ def cmd_tray_list(args: argparse.Namespace) -> int:
 
 
 def cmd_tray_show(args: argparse.Namespace) -> int:
+    from traytrim.names import item_names
     from traytrim.resolve import locate, ref_label, summarize
 
     folders = _folders(args)
@@ -201,6 +202,7 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
           f"{len(summary.game)}" + (f" ({', '.join(summary.packs)})" if summary.packs else "")
           + f". Missing: {len(summary.missing)}.")
     missing = summary.missing
+    names = item_names(summary.cc)
     group = None
     for r in summary.cc:
         if r.ref.group != group:
@@ -209,7 +211,9 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         label = ref_label(r.ref)
         conflict = f"  [{len(r.mods)} copies, using the last]" if len(r.mods) > 1 else ""
         approx = "  [approximate]" if r.approximate else ""
-        print(f"  {label:<14} {r.used.rel}{conflict}{approx}")
+        name = names.get(r.ref)
+        title = f"{name.title}  " if name is not None else ""
+        print(f"  {label:<14} {title}({r.used.rel}){conflict}{approx}")
         if args.verbose:
             for sim, uses in r.usage_by_name():
                 print(f"      {sim}: {', '.join(sorted(uses))}")

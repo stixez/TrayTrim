@@ -299,6 +299,13 @@ def stylesheet(p: Palette) -> str:
     }}
     QStatusBar::item {{ border: none; }}
 
+    QMenu {{
+        background: {p.surface}; border: 1px solid {p.border_strong};
+        border-radius: {r['control']}px; padding: {s['xs']}px;
+    }}
+    QMenu::item {{ padding: {s['s']}px {s['l']}px {s['s']}px {s['xl']}px; border-radius: 4px; }}
+    QMenu::item:selected {{ background: {p.surface_hover}; color: {p.text}; }}
+    QMenu::indicator {{ width: 14px; height: 14px; left: {s['s']}px; }}
     QToolTip {{
         background: {p.text}; color: {p.window}; border: none;
         padding: {s['xs']}px {s['s']}px; font-size: {TYPE['caption']}px;

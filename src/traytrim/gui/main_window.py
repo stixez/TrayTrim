@@ -27,8 +27,9 @@ from traytrim.gui.export_dialog import ExportDialog, ExportRequest
 from traytrim.batch import Choice
 from traytrim.gui.batch_dialog import BatchDialog
 from traytrim.gui.history_dialog import HistoryDialog
-from traytrim.plan import build_plan
-from traytrim.resolve import Where, default_excluded, for_sims, gameplay_mods, locate
+from traytrim.batch import Located, locate_item, plan_refs, scoped_refs
+from traytrim.names import item_names
+from traytrim.resolve import Where
 from traytrim.settings import Settings
 
 SIDEBAR_WIDTH = 320
@@ -80,8 +81,8 @@ class MainWindow(QMainWindow):
         self._index_ready = False
         self._full_report: HouseholdReport | None = None  # all Sims, before the Sim filter
         self._selected: tray.TrayItem | None = None
-        self._sim_choice: dict[int, set[int]] = {}  # household -> Sims to include
-        self._excluded: dict[int, set] = {}  # tray item -> TrayRefs left out of the export
+        # tray item -> the user's Sims, left-out items and chosen copies (see batch.Choice)
+        self._choices: dict[int, Choice] = {}
         self._kind = next((k for k in KINDS if k[0] == settings.tray_kind), KINDS[0])
         self._plan_task: BackgroundTask | None = None
         self._plan_gen = 0
@@ -101,6 +102,7 @@ class MainWindow(QMainWindow):
         self.household = HouseholdView()
         self.household.sims_changed.connect(self._sims_changed)
         self.household.exclusion_changed.connect(self._exclusion_changed)
+        self.household.copies_chosen.connect(self._copies_chosen)
         self.household.export_requested.connect(self._export)
         row.addWidget(self.household, 1)
         self.setCentralWidget(root)
@@ -343,7 +345,7 @@ class MainWindow(QMainWindow):
     def _sims_changed(self, sim_ids: set[int]) -> None:
         if self._selected is None:
             return
-        self._sim_choice[self._selected.instance] = sim_ids
+        self._choice(self._selected.instance).sim_ids = sim_ids
         full = self._full_report
         if full is not None and full.item.instance == self._selected.instance:
             self._show_report(full)  # just a filter over what's already looked up
@@ -363,12 +365,10 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(250, lambda: self._show_reading(gen, item))
 
         def work() -> HouseholdReport:
-            contents = tray.read_contents(item)
-            ids = {s.sim.sim_id for s in contents.sims}
             with ResourceIndex() as ix:
-                refs = locate(contents, ix)
-            return HouseholdReport(item, contents, refs, ids,
-                                   overrides=default_excluded(contents, refs))
+                located = locate_item(item, ix)
+            return HouseholdReport(item, located.contents, located.refs, located.sim_ids,
+                                   overrides=located.start_excluded)
 
         run_in_background(work, lambda r: self._on_report(gen, r),
                           lambda e: self._on_report_failed(gen, item, e))
@@ -386,6 +386,7 @@ class MainWindow(QMainWindow):
         self._done_gen = gen
         self._full_report = report
         self._show_report(report)
+        self._load_names(report)
         known = self.household.thumbnails()
         wanted: dict[int, set[int]] = {}  # thumbnail type -> instances
         for r in report.refs:
@@ -409,13 +410,30 @@ class MainWindow(QMainWindow):
         run_in_background(work, lambda images: self.household.set_thumbnails(instance, images),
                           lambda _e: self.household.set_thumbnails(instance, {}))
 
+    def _load_names(self, report: HouseholdReport) -> None:
+        """Item names come from each CC package's string tables; read them off the UI thread
+        and show them when they're there (big lots take a few seconds)."""
+        known = self.household.known_names()
+        refs = [r for r in report.refs if r.where is Where.CC and r.ref not in known]
+        if refs:
+            instance = report.item.instance
+            run_in_background(lambda: item_names(refs),
+                              lambda names: self.household.set_names(instance, names),
+                              lambda _e: None)  # names are a nicety; package names stay
+
+    def _choice(self, instance: int) -> Choice:
+        return self._choices.setdefault(instance, Choice())
+
     def _show_report(self, full: HouseholdReport) -> None:
         all_ids = {s.sim.sim_id for s in full.contents.sims}
-        chosen = (self._sim_choice.get(full.item.instance, all_ids) & all_ids) or all_ids
-        refs = full.refs if chosen == all_ids else for_sims(full.refs, chosen)
-        excluded = self._excluded.setdefault(full.item.instance, set(full.overrides))
+        choice = self._choice(full.item.instance)
+        if choice.excluded is None:
+            choice.excluded = set(full.overrides)
+        chosen = ((choice.sim_ids or all_ids) & all_ids) or all_ids
+        refs = scoped_refs(Located(full.item, full.contents, full.refs, full.overrides), chosen)
         self.household.show_report(HouseholdReport(full.item, full.contents, refs, chosen,
-                                                   excluded, full.overrides))
+                                                   choice.excluded, full.overrides,
+                                                   choice.copies))
         self._start_plan()
 
     # Export plan (sizes, conflicts, missing files)
@@ -423,7 +441,24 @@ class MainWindow(QMainWindow):
     def _exclusion_changed(self, excluded: set) -> None:
         if self._selected is None:
             return
-        self._excluded[self._selected.instance] = excluded
+        self._choice(self._selected.instance).excluded = excluded
+        self._replan()
+
+    def _copies_chosen(self, picks: dict) -> None:
+        """The user picked which copies go into the export ({key: package path}, or None for
+        the default, the copy the game loads)."""
+        if self._selected is None:
+            return
+        copies = self._choice(self._selected.instance).copies
+        for key, path in picks.items():
+            if path is None:
+                copies.pop(key, None)
+            else:
+                copies[key] = path
+        self.household.plan_outdated()
+        self._replan()
+
+    def _replan(self) -> None:
         # A plan still running was built for the old choice: drop it now, not when it lands.
         self._plan_gen += 1
         if self._plan_task is not None and self._plan_task.running:
@@ -439,15 +474,13 @@ class MainWindow(QMainWindow):
             return
         self._plan_gen += 1
         gen, instance = self._plan_gen, report.item.instance
-        refs, excluded = report.refs, set(report.excluded)
+        refs, excluded, copies = report.refs, set(report.excluded), dict(report.copies)
         contents, sim_ids = report.contents, set(report.sim_ids)
 
         def work(task: BackgroundTask):
             with ResourceIndex() as ix:
-                plan = build_plan(refs, ix, excluded,
-                                  lambda done, total: task.report(done, total),
-                                  task.cancelled)
-                return plan, gameplay_mods(contents, ix, sim_ids)
+                return plan_refs(contents, refs, sim_ids, excluded, copies, ix,
+                                 lambda done, total: task.report(done, total), task.cancelled)
 
         task = BackgroundTask(work)
         task.progress.connect(
@@ -486,9 +519,8 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Exports can start once the index of your Mods and "
                                          "game packages is ready.", 10_000)
             return
-        choices = {i.instance: Choice(self._sim_choice.get(i.instance),
-                                      self._excluded.get(i.instance)) for i in items
-                   if i.instance in self._sim_choice or i.instance in self._excluded}
+        choices = {i.instance: self._choices[i.instance] for i in items
+                   if i.instance in self._choices}
         selected = self._selected.instance if self._selected is not None else None
         self._run_dialog(BatchDialog(items, self._kind[3], choices, self.settings,
                                      self.folders.user_dir, self.folders.game_dir, selected,

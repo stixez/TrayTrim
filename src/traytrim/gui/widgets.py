@@ -101,9 +101,13 @@ class ClampedText(QWidget):
         super().__init__(parent)
         self._text = text
         self._lines = lines
-        self.setToolTip(text)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setFixedHeight(self.fontMetrics().lineSpacing() * lines)
+
+    def set_text(self, text: str) -> None:
+        if text != self._text:
+            self._text = text
+            self.update()
 
     def paintEvent(self, _event) -> None:  # noqa: N802
         painter = QPainter(self)
