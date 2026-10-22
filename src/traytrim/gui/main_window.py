@@ -177,7 +177,8 @@ class MainWindow(QMainWindow):
         foot = QHBoxLayout()
         foot.setContentsMargins(SPACE["l"], 0, SPACE["l"], SPACE["m"])
         self.batch_button = link_button("Export several")
-        self.batch_button.setToolTip("Export several at once, one zip each (Ctrl+Shift+E)")
+        self.batch_button.setToolTip("Export several at once, one zip each or together "
+                                     "(Ctrl+Shift+E)")
         self.batch_button.clicked.connect(self._export_several)
         self.batch_button.setEnabled(False)
         history = link_button("Export history")
@@ -529,14 +530,11 @@ class MainWindow(QMainWindow):
                                 self.folders.user_dir, self.folders.game_dir)
         self._run_dialog(ExportDialog(request, self.settings, self))
 
-    def _kind_items(self) -> list[tray.TrayItem]:
-        return [i for i in self.trays.source.items if i.type == self._kind[1]]
-
     def _update_batch_button(self) -> None:
-        self.batch_button.setEnabled(self._index_ready and bool(self._kind_items()))
+        self.batch_button.setEnabled(self._index_ready and bool(self.trays.source.items))
 
     def _export_several(self) -> None:
-        items = self._kind_items()
+        items = list(self.trays.source.items)
         if not items:
             return
         if not self._index_ready:
@@ -546,9 +544,8 @@ class MainWindow(QMainWindow):
         choices = {i.instance: self._choices[i.instance] for i in items
                    if i.instance in self._choices}
         selected = self._selected.instance if self._selected is not None else None
-        self._run_dialog(BatchDialog(items, self._kind[3], choices, self.settings,
-                                     self.folders.user_dir, self.folders.game_dir, selected,
-                                     self))
+        self._run_dialog(BatchDialog(items, choices, self.settings, self.folders.user_dir,
+                                     self.folders.game_dir, selected, self))
 
     def _show_history(self) -> None:
         self._run_dialog(HistoryDialog(self))

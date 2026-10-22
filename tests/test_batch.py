@@ -10,7 +10,7 @@ import pytest
 from test_build import (CHAIR, EA_SOFA, LAMP, WALL, items_by_kind, tray_dir,  # noqa: F401
                         write)
 from traytrim import restypes
-from traytrim.batch import Choice, export_many, prepare
+from traytrim.batch import Choice, export_many, export_together, prepare
 from traytrim.dbpf import ResourceKey
 from traytrim.export import ExportOptions
 from traytrim.index import ResourceIndex
@@ -143,3 +143,38 @@ def test_check_zip_reports_damaged_compressed_files_and_foreign_zips(tmp_path, i
         z.writestr("holiday.jpg", b"jpeg")
     [only] = check_zip(foreign).checks
     assert only.name == "It's a TrayTrim export" and not only.passed
+
+
+def test_export_together_shares_one_package(tmp_path, index, tray_dir):  # noqa: F811
+    items = items_by_kind(tray_dir)
+    lot, room = items["lot"], items["room"]
+    chair = TrayRef(RefKind.OBJECT, CHAIR)
+    # Left out of the lot but not of the room: the room still needs it.
+    result = export_together([lot, room], ExportOptions(tmp_path / "out", "", False), index,
+                             {lot.instance: Choice(excluded={chair})})
+    assert result.verification.ok and result.zip_path.name == "Seaside_and_Nursery_TrayTrim.zip"
+    with zipfile.ZipFile(result.zip_path) as z:
+        names = z.namelist()
+        report = json.loads(z.read("report.json"))
+        readme = z.read("README.txt").decode()
+    assert sum(n.endswith(".package") for n in names) == 1
+    assert {n for n in names if n.startswith("Tray/")} == {
+        f"Tray/{f.name}" for f in lot.files + room.files}
+    assert report["kind"] == "bundle" and [i["kind"] for i in report["items"]] == ["lot", "room"]
+    keys = [f["key"] for f in report["files"]]
+    assert len(keys) == len(set(keys))  # the chair both use is in it once
+    assert any(f"{restypes.OBJECT_DEFINITION:08X}" in k and f"{CHAIR:016X}" in k for k in keys)
+    assert "Lot: Seaside" in readme and "Room: Nursery" in readme
+    assert check_zip(result.zip_path).ok
+
+
+def test_export_together_with_nothing_to_export(tmp_path, index, tray_dir):  # noqa: F811
+    from traytrim.export import ExportError
+
+    room = items_by_kind(tray_dir)["room"]
+    everything = {TrayRef(RefKind.OBJECT, CHAIR), TrayRef(RefKind.OBJECT, LAMP),
+                  TrayRef(RefKind.BUILD, WALL.instance, type_id=WALL.type, res_group=0)}
+    with pytest.raises(ExportError):
+        export_together([room], ExportOptions(tmp_path / "out", "", False), index,
+                        {room.instance: Choice(excluded=everything)})
+    assert not (tmp_path / "out").exists() or not any((tmp_path / "out").iterdir())

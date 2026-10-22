@@ -1,4 +1,5 @@
-"""Export several tray items in a row: pick them, then one verified zip each."""
+"""Export several tray items: one verified zip each, or together in one zip that shares one
+package (a lot with the household that lives there)."""
 
 from __future__ import annotations
 
@@ -10,7 +11,8 @@ from PySide6.QtWidgets import (QAbstractButton, QDialog, QFileDialog, QFrame, QG
                                QHBoxLayout, QProgressBar, QPushButton, QScrollArea,
                                QStackedWidget, QVBoxLayout, QWidget)
 
-from traytrim.batch import Choice, Outcome, export_many
+from traytrim import tray
+from traytrim.batch import Choice, Outcome, export_many, export_together
 from traytrim.export import ExportOptions, forbidden_reason
 from traytrim.gui import icons, system, theme
 from traytrim.gui.export_dialog import STEPS
@@ -136,14 +138,18 @@ class PickRow(QAbstractButton):
                          Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, second)
 
 
-class BatchDialog(QDialog):
-    """Pick items of one kind, export each to its own zip, and show how each one went."""
+_KIND_HEADINGS = ((tray.ITEM_HOUSEHOLD, "Households"), (tray.ITEM_LOT, "Lots"),
+                  (tray.ITEM_ROOM, "Rooms"))
 
-    def __init__(self, items: list[TrayItem], noun: str, choices: dict[int, Choice],
+
+class BatchDialog(QDialog):
+    """Pick tray items of any kind, export them, and show how each one went."""
+
+    def __init__(self, items: list[TrayItem], choices: dict[int, Choice],
                  settings: Settings, user_dir: Path | None, game_dir: Path | None,
                  preselect: int | None = None, parent=None):
         super().__init__(parent)
-        self.items, self.noun, self.choices = items, noun, choices
+        self.items, self.choices = items, choices
         self.settings, self.user_dir, self.game_dir = settings, user_dir, game_dir
         self.out_dir = Path(settings.output_dir) if settings.output_dir else system.desktop()
         self._task: BackgroundTask | None = None
@@ -154,12 +160,13 @@ class BatchDialog(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SPACE["xl"], SPACE["xl"], SPACE["xl"], SPACE["l"])
         outer.setSpacing(SPACE["s"])
-        self.title = label(f"Export several {noun}", "title")
+        self.title = label("Export several", "title")
         outer.addWidget(self.title)
         self.intro = label(
-            "Each one gets its own zip, checked like a single export. What you chose in the "
-            "app (Sims, left-out items) is kept; the others start from the defaults.",
-            "secondary", wrap=True)
+            "Each one gets its own zip, checked like a single export, or put them together in "
+            "one zip that shares one package, like a lot with the household that lives there. "
+            "What you chose in the app (Sims, left-out items, copies) is kept; the rest start "
+            "from the defaults.", "secondary", wrap=True)
         outer.addWidget(self.intro)
         outer.addSpacing(SPACE["s"])
 
@@ -181,12 +188,21 @@ class BatchDialog(QDialog):
         self.list_col = QVBoxLayout(holder)
         self.list_col.setContentsMargins(0, 0, SPACE["s"], 0)
         self.list_col.setSpacing(0)
-        for item in items:
-            row = PickRow(item)
-            row.setChecked(item.instance == preselect)
-            row.toggled.connect(self._update_count)
-            self._rows.append(row)
-            self.list_col.addWidget(row)
+        self._headings: list[QWidget] = []
+        for item_type, heading in _KIND_HEADINGS:
+            of_kind = [i for i in items if i.type == item_type]
+            if not of_kind:
+                continue
+            title = label(heading, "noticeTitle")
+            title.setContentsMargins(0, SPACE["m"] if self._rows else 0, 0, SPACE["xs"])
+            self._headings.append(title)
+            self.list_col.addWidget(title)
+            for item in of_kind:
+                row = PickRow(item)
+                row.setChecked(item.instance == preselect)
+                row.toggled.connect(self._update_count)
+                self._rows.append(row)
+                self.list_col.addWidget(row)
         self.list_col.addStretch(1)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -221,14 +237,22 @@ class BatchDialog(QDialog):
         where.addWidget(change)
         grid.addLayout(where, 0, 1)
         col.addLayout(grid)
-        self.kit_chip = SimChip("Also make an in-game test kit for each")
-        self.kit_chip.setAccessibleName("Also make an in-game test kit for each")
-        self.kit_chip.setToolTip("A folder per export with only its package and steps to try "
-                                 "it in your game with nothing else installed.")
-        kit_row = QHBoxLayout()
-        kit_row.addWidget(self.kit_chip)
-        kit_row.addStretch(1)
-        col.addLayout(kit_row)
+        self.together_chip = SimChip("Together in one zip")
+        self.together_chip.setAccessibleName("Export them together in one zip")
+        self.together_chip.setToolTip(
+            "One zip with all their tray files and one package with the CC of all of them; "
+            "CC they share is in it once.")
+        self.together_chip.toggled.connect(self._update_count)
+        self.kit_chip = SimChip("In-game test kit")
+        self.kit_chip.setAccessibleName("Also make an in-game test kit")
+        self.kit_chip.setToolTip("A folder next to each zip with only its package and steps to "
+                                 "try it in your game with nothing else installed.")
+        chips = QHBoxLayout()
+        chips.setSpacing(SPACE["s"])
+        chips.addWidget(self.together_chip)
+        chips.addWidget(self.kit_chip)
+        chips.addStretch(1)
+        col.addLayout(chips)
         col.addWidget(Notice(
             "info", "text_secondary", "For your own use",
             "Exports are meant for your own backups and transfers, or for CC you have the "
@@ -303,9 +327,11 @@ class BatchDialog(QDialog):
     def _update_count(self) -> None:
         n = len(self._picked())
         self.count_label.setText(f"{n} of {len(self._rows)} selected" if n
-                                 else f"{plural(len(self._rows), self.noun[:-1], self.noun)}")
-        self.export_button.setEnabled(n > 0)
-        self.export_button.setText(f"Export {n}" if n else "Export")
+                                 else plural(len(self._rows), "item"))
+        together = self.together_chip.isChecked()
+        self.export_button.setEnabled(n > 1 if together else n > 0)
+        self.export_button.setText("Export together" if together
+                                   else f"Export {n}" if n else "Export")
 
     def _set_all(self, checked: bool) -> None:
         for row in self._rows:
@@ -332,17 +358,21 @@ class BatchDialog(QDialog):
             return
         self._running = self._picked()
         items = [r.item for r in self._running]
+        self._together = self.together_chip.isChecked()
         for row in self._rows:
             row.setVisible(row in self._running)
             row.set_running()
+        for heading in self._headings:
+            heading.hide()
         for row in self._running:
             row.set_status("Waiting")
         self.all_button.hide()
         self.none_button.hide()
-        self.title.setText(f"Exporting {plural(len(items), self.noun[:-1], self.noun)}")
+        self.title.setText(f"Exporting {plural(len(items), 'item')}"
+                           + (" together" if self._together else ""))
         self.intro.setText(f"To {self.out_dir}")
         self.count_label.setText("")
-        self.bar.setRange(0, len(items) * 100)
+        self.bar.setRange(0, 100 if self._together else len(items) * 100)
         self.bar.setValue(0)
         self.pages.setCurrentIndex(1)
         options = ExportOptions(self.out_dir, "", self.kit_chip.isChecked(), self.user_dir,
@@ -355,9 +385,16 @@ class BatchDialog(QDialog):
 
         def work(task: BackgroundTask) -> None:
             with ResourceIndex() as ix:
-                export_many(items, options, ix, choices,
-                            lambda *args: task.report(*args, force=args[1] == "done"),
-                            task.cancelled, lambda _position, o: collected.append(o))
+                if not self._together:
+                    export_many(items, options, ix, choices,
+                                lambda *args: task.report(*args, force=args[1] == "done"),
+                                task.cancelled, lambda _position, o: collected.append(o))
+                    return
+                result = export_together(items, options, ix, choices,
+                                         lambda step, d, t: task.report(-1, step, d, t),
+                                         task.cancelled)
+                collected.extend(Outcome(item, result) for item in items)
+
 
         task = BackgroundTask(work, keep_late_result=True)
         task.progress.connect(self._on_progress)
@@ -369,6 +406,14 @@ class BatchDialog(QDialog):
 
     def _on_progress(self, args: tuple) -> None:
         position, step, done, total = args
+        if position < 0:  # together: one export for every row
+            text = ("Working out the export" if step == "plan"
+                    else f"{STEPS[step]}: {done:,} of {total:,}")
+            for row in self._running:
+                row.set_status(text)
+            share = {"plan": 0.0, "package": 0.2, "verify": 0.6, "zip": 0.9}[step]
+            self.bar.setValue(int(share * 100))
+            return
         row = self._running[position]
         if step == "done":
             self.bar.setValue((position + 1) * 100)
@@ -384,6 +429,9 @@ class BatchDialog(QDialog):
 
     def _show_outcomes(self, error: Exception | None = None) -> None:
         self._task = None
+        if self._together:
+            self._show_together(error)
+            return
         by_item = {id(o.item): o for o in self._outcomes}
         saved = verified = 0
         for row in self._running:
@@ -408,7 +456,7 @@ class BatchDialog(QDialog):
         if error is not None:
             self.title.setText("The exports stopped")
         elif verified == n:
-            self.title.setText(f"{plural(n, self.noun[:-1], self.noun)} exported and verified"
+            self.title.setText(f"{plural(n, 'item')} exported and verified"
                                if n > 1 else "Exported and verified")
         else:
             self.title.setText(f"{saved} of {n} exported")
@@ -418,6 +466,31 @@ class BatchDialog(QDialog):
             where = f"{describe_error(error)}. {where}"
         self.intro.setText(where + (f" {plural(failed, 'export')} saved with a failed check: "
                                     "open its report.json for the details." if failed else ""))
+        self._finish(saved > 0)
+
+    def _show_together(self, error: Exception | None) -> None:
+        result = self._outcomes[0].result if self._outcomes else None
+        if result is not None:
+            ok = result.verification.ok
+            for row in self._running:
+                row.set_status("In the zip" if ok else "Saved, a check failed",
+                               ("check", "success_text") if ok else ("alert", "danger_text"))
+                row.setToolTip(str(result.zip_path))
+            self.title.setText("Exported together and verified" if ok
+                               else "Exported together, but a check failed")
+            self.intro.setText(f"{result.zip_path.name}, {human_size(result.zip_size)}, in "
+                               f"{self.out_dir}." + ("" if ok else " Open its report.json for "
+                                                     "the details."))
+        else:
+            stopped = error is None
+            for row in self._running:
+                row.set_status("Not exported", ("excluded", "text_tertiary"))
+            self.title.setText("Export stopped" if stopped else "The export failed")
+            self.intro.setText("Nothing was saved." if stopped
+                               else f"{describe_error(error)}. Nothing was saved.")
+        self._finish(result is not None)
+
+    def _finish(self, saved: bool) -> None:
         self.bar.setValue(self.bar.maximum())
         if saved:
             self.settings.output_dir = str(self.out_dir)

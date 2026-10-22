@@ -105,15 +105,23 @@ def test_history_dates():
 def test_batch_dialog_picking(app, tmp_path):
     from traytrim.gui.batch_dialog import BatchDialog
 
-    lots = [TrayItem(i, 2, f"Lot {i}", size=(20, 20)) for i in range(1, 4)]
-    dialog = BatchDialog(lots, "lots", {}, Settings(output_dir=str(tmp_path)), None, None,
+    lots = [TrayItem(i, 2, f"Lot {i}", size=(20, 20)) for i in range(1, 3)]
+    home = TrayItem(9, 1, "Goth", sims=[TraySim(9, "Bella", "Goth")])
+    dialog = BatchDialog(lots + [home], {}, Settings(output_dir=str(tmp_path)), None, None,
                          preselect=2)
-    assert [r.isChecked() for r in dialog._rows] == [False, True, False]
+    # Households first, under their own heading
+    assert [r.item.name for r in dialog._rows] == ["Goth", "Lot 1", "Lot 2"]
+    assert [h.text() for h in dialog._headings] == ["Households", "Lots"]
+    assert [r.isChecked() for r in dialog._rows] == [False, False, True]
     assert dialog.export_button.text() == "Export 1"
+    dialog.together_chip.setChecked(True)  # together needs at least two
+    assert not dialog.export_button.isEnabled()
+    dialog._rows[0].setChecked(True)
+    assert dialog.export_button.isEnabled() and dialog.export_button.text() == "Export together"
     dialog._set_all(True)
     assert dialog.count_label.text() == "3 of 3 selected"
     dialog._set_all(False)
-    assert not dialog.export_button.isEnabled() and dialog.count_label.text() == "3 lots"
+    assert not dialog.export_button.isEnabled() and dialog.count_label.text() == "3 items"
 
 
 def test_detail_view_search_sort_and_names(app, tmp_path):

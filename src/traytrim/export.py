@@ -1,5 +1,6 @@
 """Build the export: one package with exactly the planned resources (stored bytes copied
-unchanged), the household's tray files, a README and a report, zipped. Then verify it, and
+unchanged), the tray files of the household, lot or room (or of several, sharing the one
+package), a README and a report, zipped. Then verify it, and
 optionally prepare an in-game test kit.
 
 Files: everything is built in a hidden staging folder inside the chosen output folder and only
@@ -64,6 +65,28 @@ class ExportResult:
     gameplay_mods: list[GameplayMod] = field(default_factory=list)
 
 
+@dataclass
+class Part:
+    """One tray item in an export. An export holds one, or several sharing one package."""
+    item: TrayItem
+    contents: HouseholdContents
+    sim_ids: set[int]
+
+    @property
+    def kind(self) -> str:
+        return self.contents.kind
+
+
+def bundle_title(parts: list[Part]) -> str:
+    """"Seaside", "Seaside and Moreau", "Seaside, Moreau and Nursery", "Seaside and 3 more"."""
+    names = [p.item.name or f"Unnamed {p.kind}" for p in parts]
+    if len(names) <= 1:
+        return names[0] if names else ""
+    if len(names) <= 3:
+        return f"{', '.join(names[:-1])} and {names[-1]}"
+    return f"{names[0]} and {len(names) - 1} more"
+
+
 def safe_name(text: str, fallback: str = "Household") -> str:
     """A file-name-safe version of a Sim or household name: "Camille Moreau" -> Camille_Moreau."""
     cleaned = re.sub(r"[^\w\-]+", "_", text, flags=re.UNICODE).strip("_")
@@ -117,6 +140,17 @@ def export_household(item: TrayItem, contents: HouseholdContents, refs: list[Loc
                      options: ExportOptions, index: ResourceIndex,
                      progress: Progress | None = None,
                      cancel: threading.Event | None = None) -> ExportResult:
+    """Export one household, lot or room."""
+    return export_parts([Part(item, contents, sim_ids)], refs, plan, gameplay, options, index,
+                        progress, cancel)
+
+
+def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
+                 gameplay: list[GameplayMod], options: ExportOptions, index: ResourceIndex,
+                 progress: Progress | None = None,
+                 cancel: threading.Event | None = None) -> ExportResult:
+    """Export tray items whose CC is planned together (`refs` and `plan` cover all of them)
+    into one zip with one package."""
     out_dir = options.out_dir
     reason = forbidden_reason(out_dir, options.user_dir, options.game_dir)
     if reason:
@@ -137,22 +171,21 @@ def export_household(item: TrayItem, contents: HouseholdContents, refs: list[Loc
 
         tray_dir = content / "Tray"
         tray_dir.mkdir()
-        for f in item.files:
-            shutil.copy2(f, tray_dir / f.name)
+        for part in parts:
+            for f in part.item.files:
+                shutil.copy2(f, tray_dir / f.name)
 
         summary = summarize(refs)
-        report = _report(item, contents, sim_ids, plan, summary, gameplay, verification,
-                         package_name)
+        report = _report(parts, plan, summary, gameplay, verification, package_name)
         (content / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         (content / "README.txt").write_text(
-            _readme(item, contents, sim_ids, plan, summary, gameplay, verification,
-                    package_name), encoding="utf-8")
+            _readme(parts, plan, summary, gameplay, verification, package_name),
+            encoding="utf-8")
 
         staged_kit = None
         if options.test_kit:
             staged_kit = stage / "kit"
-            _test_kit(staged_kit, package_path, tray_dir, options.user_dir, item, contents,
-                      sim_ids)
+            _test_kit(staged_kit, package_path, tray_dir, options.user_dir, parts)
 
         staged_zip = stage / "export.zip"
         _write_zip(content, staged_zip, progress, cancel)
@@ -173,7 +206,7 @@ def export_household(item: TrayItem, contents: HouseholdContents, refs: list[Loc
                               zip_path.stat().st_size, verification, kit, gameplay)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-    _add_to_history(item, result)
+    _add_to_history(parts, result)
     return result
 
 
@@ -226,15 +259,27 @@ def _packs_text(packs: list[str]) -> str:
     return ", ".join("base game" if p == "base" else p for p in packs) or "none"
 
 
-def _report(item, contents, sim_ids, plan: Plan, summary, gameplay, verification,
+def _part_info(part: Part) -> dict:
+    return {"name": part.item.name, "kind": part.kind, "tray_id": part.item.id_text,
+            "sims": (_sim_names(part.contents, part.sim_ids) if part.kind == "household"
+                     else [])}
+
+
+def _kind(parts: list[Part]) -> str:
+    return parts[0].kind if len(parts) == 1 else "bundle"
+
+
+def _report(parts: list[Part], plan: Plan, summary, gameplay, verification,
             package_name) -> dict:
+    first = _part_info(parts[0])
     return {
         "traytrim": __version__,
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "name": item.name,
-        "kind": contents.kind,
-        "tray_id": item.id_text,
-        "sims": _sim_names(contents, sim_ids) if contents.kind == "household" else [],
+        "name": bundle_title(parts),
+        "kind": _kind(parts),
+        "tray_id": first["tray_id"] if len(parts) == 1 else None,
+        "sims": first["sims"] if len(parts) == 1 else [],
+        "items": [_part_info(p) for p in parts],
         "package": package_name,
         "package_bytes": plan.export_size,
         "whole_packages_bytes": plan.whole_size,
@@ -257,19 +302,27 @@ def _report(item, contents, sim_ids, plan: Plan, summary, gameplay, verification
     }
 
 
-def _readme(item, contents, sim_ids, plan: Plan, summary, gameplay, verification,
+def _readme(parts: list[Part], plan: Plan, summary, gameplay, verification,
             package_name) -> str:
-    kind = contents.kind
+    kind = _kind(parts)
     what = {"household": "these Sims use", "lot": "this lot uses",
-            "room": "this room uses"}[kind]
-    lines = [f"{item.name}: exported with TrayTrim {__version__}", ""]
+            "room": "this room uses", "bundle": "they use"}[kind]
+    lines = [f"{bundle_title(parts)}: exported with TrayTrim {__version__}", ""]
     if kind == "household":
-        lines += [f"Sims: {', '.join(_sim_names(contents, sim_ids))}", ""]
+        lines += [f"Sims: {', '.join(_sim_names(parts[0].contents, parts[0].sim_ids))}", ""]
+    elif kind == "bundle":
+        lines += ["Contains"]
+        for p in parts:
+            sims = _sim_names(p.contents, p.sim_ids) if p.kind == "household" else []
+            lines.append(f"  {p.kind.capitalize()}: {p.item.name}"
+                         + (f" ({', '.join(sims)})" if sims else ""))
+        lines.append("")
+    find = "them" if kind == "bundle" else f"the {kind}"
     lines += [
         "How to install",
         "  1. Copy the files in Tray/ into Documents/Electronic Arts/The Sims 4/Tray",
         f"  2. Copy Mods/{package_name} into Documents/Electronic Arts/The Sims 4/Mods",
-        f"  3. Start the game and find the {kind} in the Library.",
+        f"  3. Start the game and find {find} in the Library.",
         "",
         "What's in the package",
         f"  Only the custom content {what}: {len(plan.resources):,} files "
@@ -304,14 +357,18 @@ def _readme(item, contents, sim_ids, plan: Plan, summary, gameplay, verification
 
 
 def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | None,
-              item: TrayItem, contents: HouseholdContents, sim_ids: set[int]) -> None:
+              parts: list[Part]) -> None:
     (kit / "Mods").mkdir(parents=True)
     shutil.copy2(package_path, kit / "Mods" / package_path.name)
     shutil.copytree(tray_dir, kit / "Tray")
     sims = user_dir or Path("Documents/Electronic Arts/The Sims 4")
-    names = ", ".join(_sim_names(contents, sim_ids))
+    kind = _kind(parts)
+    one = parts[0]
+    names = ", ".join(_sim_names(one.contents, one.sim_ids))
+    them, it = ("them", "they're") if kind == "bundle" else (f"the {kind}", f"the {kind} is")
     steps = [
-        f"In-game test for {item.name}" + (f" ({names})" if contents.kind == "household" else ""),
+        f"In-game test for {bundle_title(parts)}" + (f" ({names})" if kind == "household"
+                                                      else ""),
         "",
         "This checks the export in the game with nothing but the exported package installed.",
         "TrayTrim never touches your Mods folder; these steps (or the two .bat files on",
@@ -322,9 +379,8 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
         "3. Make a new, empty Mods folder there, and copy into it:",
         f"     - {package_path.name} from this kit's Mods folder",
         f"     - Resource.cfg from {TEST_BACKUP}",
-        (f"4. Start the game, load the {contents.kind} from the Library and compare it with how "
-         "it looks"),
-        f"   with all your mods. The {contents.kind} is already in your Tray.",
+        f"4. Start the game, load {them} from the Library and compare with how it looks",
+        f"   with all your mods. {it[0].upper() + it[1:]} already in your Tray.",
         "5. Close the game. Delete the test Mods folder and rename "
         f"{TEST_BACKUP} back to Mods.",
         "",
@@ -335,7 +391,7 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
     ]
     (kit / "HOW_TO_TEST.txt").write_text("\n".join(steps), encoding="utf-8")
     if sys.platform == "win32":
-        _write_bats(kit, Path(sims), package_path.name, contents.kind)
+        _write_bats(kit, Path(sims), package_path.name, kind)
 
 
 _RUNNING_CHECK = """tasklist /FI "IMAGENAME eq TS4_x64.exe" | find /I "TS4_x64.exe" >nul && goto running
@@ -345,6 +401,7 @@ tasklist /FI "IMAGENAME eq TS4_DX9_x64.exe" | find /I "TS4_DX9_x64.exe" >nul && 
 
 def _write_bats(kit: Path, sims: Path, package: str, kind: str = "household") -> None:
     load = ("load the household in Create a Sim" if kind == "household"
+            else "load them from the Library" if kind == "bundle"
             else f"place the {kind} from the Library")
     head = f"""@echo off
 chcp 65001 >nul
@@ -446,13 +503,13 @@ def load_history() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _add_to_history(item: TrayItem, result: ExportResult) -> None:
+def _add_to_history(parts: list[Part], result: ExportResult) -> None:
     entries = load_history()
     entries.insert(0, {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "name": item.name,
-        "kind": item.kind,
-        "tray_id": item.id_text,
+        "name": bundle_title(parts),
+        "kind": _kind(parts),
+        "tray_id": parts[0].item.id_text if len(parts) == 1 else None,
         "zip": str(result.zip_path),
         "bytes": result.zip_size,
         "verified": result.verification.ok,

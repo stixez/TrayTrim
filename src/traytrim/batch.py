@@ -13,7 +13,8 @@ from typing import Callable
 from traytrim import tray
 from traytrim.dbpf import ResourceKey
 from traytrim.errors import describe_error
-from traytrim.export import ExportOptions, ExportResult, default_base_name, export_household
+from traytrim.export import (ExportError, ExportOptions, ExportResult, Part, bundle_title,
+                             default_base_name, export_household, export_parts, safe_name)
 from traytrim.index import ResourceIndex
 from traytrim.plan import Cancelled, Plan, build_plan
 from traytrim.resolve import (GameplayMod, LocatedRef, default_excluded, for_sims,
@@ -151,3 +152,55 @@ def export_many(items: list[TrayItem], options: ExportOptions, index: ResourceIn
             on_outcome(position, outcome)
         report(position, "done", 1, 1)
     return outcomes
+
+
+def export_together(items: list[TrayItem], options: ExportOptions, index: ResourceIndex,
+                    choices: dict[int, Choice] | None = None,
+                    progress: Callable[[str, int, int], None] | None = None,
+                    cancel: threading.Event | None = None) -> ExportResult:
+    """Export several tray items into one zip with one package holding the CC of all of them
+    (CC they share is in it once): a lot with the household that lives there, say.
+    progress(step, done, total): "plan", then the export steps."""
+    choices = choices or {}
+    parts: list[Part] = []
+    merged: dict[TrayRef, LocatedRef] = {}
+    kept: set[TrayRef] = set()      # included by at least one item
+    every: set[TrayRef] = set()
+    copies: dict[ResourceKey, Path] = {}
+    for item in items:
+        if cancel is not None and cancel.is_set():
+            raise Cancelled
+        choice = choices.get(item.instance) or Choice()
+        located = locate_item(item, index)
+        all_ids = located.sim_ids
+        sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
+        refs = scoped_refs(located.refs, all_ids, sim_ids)
+        excluded = choice.excluded if choice.excluded is not None else located.start_excluded
+        parts.append(Part(item, located.contents, sim_ids))
+        copies.update(choice.copies)
+        for r in refs:
+            every.add(r.ref)
+            if r.ref not in excluded:
+                kept.add(r.ref)
+            if r.ref in merged:
+                both = merged[r.ref]
+                merged[r.ref] = replace(both, usage={**both.usage, **r.usage},
+                                        names={**both.names, **r.names})
+            else:
+                merged[r.ref] = r
+    # Left out only where every item that uses it leaves it out.
+    excluded_all = every - kept
+    refs_all = list(merged.values())
+    plan = build_plan(refs_all, index, excluded_all,
+                      (lambda d, t: progress("plan", d, t)) if progress else None, cancel,
+                      copies)
+    if not plan.resources:
+        raise ExportError("None of them uses CC from your Mods folder (or all of it is left "
+                          "out), so there's nothing to export.")
+    gameplay: dict[str, GameplayMod] = {}
+    for part in parts:
+        for m in gameplay_mods(part.contents, index, part.sim_ids):
+            gameplay.setdefault(m.rel, m)
+    base = options.base_name or safe_name(bundle_title(parts), "TrayTrim")
+    return export_parts(parts, refs_all, plan, list(gameplay.values()),
+                        replace(options, base_name=base), index, progress, cancel)
