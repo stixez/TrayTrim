@@ -11,6 +11,7 @@ never copied.
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import threading
@@ -352,17 +353,14 @@ class ResourceIndex:
         """Keys in Mods with any of these instances and one of these types, in one query."""
         if not instances or not types:
             return []
-        db = self.db
-        db.execute("CREATE TEMP TABLE IF NOT EXISTS find_inst (inst INTEGER PRIMARY KEY)")
-        db.execute("DELETE FROM find_inst")
-        db.executemany("INSERT OR IGNORE INTO find_inst VALUES (?)",
-                       ((_s64(i),) for i in instances))
         marks = ",".join("?" * len(types))
-        # CROSS JOIN fixes the loop order: the few candidates outside, the primary key of
+        # The candidates go in as one JSON array, read with json_each, so the lookup writes
+        # nothing. CROSS JOIN fixes the loop order: the candidates outside, the primary key of
         # mods_res (instance first) inside. Left to itself SQLite scans all of mods_res.
-        rows = db.execute(
-            f"SELECT DISTINCT r.type, r.grp, r.inst FROM find_inst f CROSS JOIN mods_res r "
-            f"WHERE r.inst = f.inst AND r.type IN ({marks})", tuple(types))
+        rows = self.db.execute(
+            f"SELECT DISTINCT r.type, r.grp, r.inst FROM json_each(?) f CROSS JOIN mods_res r "
+            f"WHERE r.inst = f.value AND r.type IN ({marks})",
+            (json.dumps(sorted(_s64(i) for i in instances)), *types))
         return [ResourceKey(t, g, i + (1 << 64) if i < 0 else i) for t, g, i in rows]
 
     def failed_packages(self) -> list[tuple[str, str]]:

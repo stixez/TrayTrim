@@ -108,30 +108,28 @@ def geom_keys(data: bytes) -> list[ResourceKey]:
 _MAX_CROSS_SCAN_BYTES = 256 << 10  # reference holders are small; geometry isn't scanned
 
 
-def large_values(data: bytes) -> set[int]:
-    """Every 64-bit value of at least 2^32 in data, at any byte alignment."""
-    data = data[:_MAX_CROSS_SCAN_BYTES]
-    found: set[int] = set()
+def _values(data: bytes):
+    """Every 64-bit little-endian value in data, at each of the 8 byte alignments."""
     for shift in range(8):
         usable = (len(data) - shift) // 8 * 8
         if usable > 0:
-            found.update(v for v in struct.unpack(f"<{usable // 8}Q",
-                                                   data[shift:shift + usable])
-                         if v >= _MIN_SCAN_INSTANCE)
+            yield struct.unpack(f"<{usable // 8}Q", data[shift:shift + usable])
+
+
+def large_values(data: bytes) -> set[int]:
+    """Every 64-bit value of at least 2^32 in data, at any byte alignment."""
+    found: set[int] = set()
+    for values in _values(data[:_MAX_CROSS_SCAN_BYTES]):
+        found.update(v for v in values if v >= _MIN_SCAN_INSTANCE)
     return found
 
 
 def scan_instances(data: bytes, candidates: set[int]) -> set[int]:
     """Which of these 64-bit instances occur anywhere in data (at any byte alignment)."""
-    if not candidates or len(data) < 8:
+    if not candidates:
         return set()
-    data = data[:_MAX_SCAN_BYTES]
     found: set[int] = set()
-    for shift in range(8):
-        usable = (len(data) - shift) // 8 * 8
-        if usable <= 0:
-            continue
-        values = struct.unpack(f"<{usable // 8}Q", data[shift:shift + usable])
+    for values in _values(data[:_MAX_SCAN_BYTES]):
         found |= candidates.intersection(values)
     return found
 

@@ -66,6 +66,7 @@ def test_export_writes_verified_zip_and_test_kit(tmp_path, household):
         report = json.loads(z.read("report.json"))
         z.extract("Mods/Camille_Moreau_TrayTrim.package", tmp_path / "unzipped")
     assert len(report["files"]) == len(plan.resources)
+    assert (report["kind"], report["name"]) == ("household", item.name)
     assert all(c["passed"] for c in report["verification"])
     with dbpf.Package(tmp_path / "unzipped" / "Mods" / "Camille_Moreau_TrayTrim.package") as pkg:
         assert {e.key for e in pkg} == set(plan.resources)
@@ -78,6 +79,7 @@ def test_export_writes_verified_zip_and_test_kit(tmp_path, household):
     if sys.platform == "win32":
         bat = (kit / "1_start_test.bat").read_text(encoding="utf-8")
         assert "TS4_x64.exe" in bat and str(tmp_path / "Sims 4") in bat
+        assert "load the household in Create a Sim" in bat
     assert load_history()[0]["verified"] is True
 
     again = export_household(item, contents, refs, plan, [], {1},

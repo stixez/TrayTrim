@@ -19,8 +19,10 @@ def _svg(name: str) -> str:
         encoding="utf-8")
 
 
+@lru_cache(maxsize=512)
 def image(name: str, colour: str, size: int = 20, scale: float = 1.0) -> QImage:
-    """The icon as a transparent image, `size` logical pixels at device `scale`."""
+    """The icon as a transparent image, `size` logical pixels at device `scale`. Cached: list
+    rows ask for the same icon on every repaint (QImage copies share their pixels)."""
     renderer = QSvgRenderer(QByteArray(_svg(name).replace("currentColor", colour).encode()))
     px = max(1, round(size * scale))
     img = QImage(px, px, QImage.Format.Format_ARGB32_Premultiplied)

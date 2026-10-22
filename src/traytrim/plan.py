@@ -30,7 +30,7 @@ from traytrim.index import ModsHit, ResourceIndex
 from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, LEAF_TYPES, ReferenceError_,
                                  large_values, references)
 from traytrim.resolve import LocatedRef, Where
-from traytrim.tray import TrayRef
+from traytrim.tray import RefKind, TrayRef
 
 Progress = Callable[[int, int], None]  # resources handled, resources known so far
 
@@ -104,7 +104,7 @@ class Plan:
 class _Packages:
     """Open packages, a few at a time, plus each package's keys by instance."""
 
-    def __init__(self, limit: int = 256):
+    def __init__(self, limit: int = 64):
         self._open: OrderedDict[Path, dbpf.Package] = OrderedDict()
         self._keys: dict[Path, dict[int, list[ResourceKey]]] = {}
         self._limit = limit
@@ -232,6 +232,11 @@ def build_plan(refs: list[LocatedRef], index: ResourceIndex,
                 # CAS shows the part's thumbnail; it's in the package but not in the key list.
                 for k in packages.keys(item.copy.path).get(key.instance, []):
                     if k.type == restypes.THUM:
+                        queue.append((k, owner, key, "thumbnail"))
+            elif via == "tray" and owner.kind is RefKind.BUILD:
+                # Build mode shows a wall's or floor's thumbnail, stored under its instance.
+                for k in packages.keys(item.copy.path).get(key.instance, []):
+                    if k.type == restypes.OBJECT_THUMB:
                         queue.append((k, owner, key, "thumbnail"))
             elif key.type == restypes.OBJECT_DEFINITION and via == "tray":
                 # An object is its definition plus everything with the same id in its package:

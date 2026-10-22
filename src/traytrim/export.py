@@ -231,9 +231,10 @@ def _report(item, contents, sim_ids, plan: Plan, summary, gameplay, verification
     return {
         "traytrim": __version__,
         "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "household": item.name,
+        "name": item.name,
+        "kind": contents.kind,
         "tray_id": item.id_text,
-        "sims": _sim_names(contents, sim_ids),
+        "sims": _sim_names(contents, sim_ids) if contents.kind == "household" else [],
         "package": package_name,
         "package_bytes": plan.export_size,
         "whole_packages_bytes": plan.whole_size,
@@ -334,7 +335,7 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
     ]
     (kit / "HOW_TO_TEST.txt").write_text("\n".join(steps), encoding="utf-8")
     if sys.platform == "win32":
-        _write_bats(kit, Path(sims), package_path.name)
+        _write_bats(kit, Path(sims), package_path.name, contents.kind)
 
 
 _RUNNING_CHECK = """tasklist /FI "IMAGENAME eq TS4_x64.exe" | find /I "TS4_x64.exe" >nul && goto running
@@ -342,7 +343,9 @@ tasklist /FI "IMAGENAME eq TS4_DX9_x64.exe" | find /I "TS4_DX9_x64.exe" >nul && 
 """
 
 
-def _write_bats(kit: Path, sims: Path, package: str) -> None:
+def _write_bats(kit: Path, sims: Path, package: str, kind: str = "household") -> None:
+    load = ("load the household in Create a Sim" if kind == "household"
+            else f"place the {kind} from the Library")
     head = f"""@echo off
 chcp 65001 >nul
 setlocal
@@ -372,7 +375,7 @@ if exist "%BACKUP%\\Resource.cfg" (
   copy "%BACKUP%\\Resource.cfg" "%MODS%\\" >nul || goto undo
 )
 copy "%~dp0Mods\\%PKG%" "%MODS%\\" >nul || goto undo
-echo The test Mods folder is ready. Start the game and load the household in Create a Sim.
+echo The test Mods folder is ready. Start the game and {load}.
 echo When you're done, close the game and run 2_end_test.bat.
 goto end
 :undo
@@ -447,7 +450,8 @@ def _add_to_history(item: TrayItem, result: ExportResult) -> None:
     entries = load_history()
     entries.insert(0, {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "household": item.name,
+        "name": item.name,
+        "kind": item.kind,
         "tray_id": item.id_text,
         "zip": str(result.zip_path),
         "bytes": result.zip_size,

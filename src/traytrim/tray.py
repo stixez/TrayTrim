@@ -43,6 +43,7 @@ from enum import Enum
 from pathlib import Path
 
 from traytrim import protobuf as pb
+from traytrim import restypes
 from traytrim.protobuf import ProtobufError
 
 ITEM_HOUSEHOLD, ITEM_LOT, ITEM_ROOM, ITEM_PART = 1, 2, 3, 5
@@ -478,7 +479,6 @@ def _collect_ids(blob: bytes, out: set[int], depth: int = 0) -> bool:
 #                     accepted only if every table offset in it is consistent.
 
 LOT_MAGIC = 0xFEA1BAAD
-OBJECT_CATALOG = 0x319E4F1D
 _BNDL = 0x424E444C
 
 
@@ -602,7 +602,7 @@ def read_build(item: TrayItem, path: Path) -> HouseholdContents:
     except (struct.error, ProtobufError) as e:
         raise TrayError(f"{path.name} is damaged ({e}).") from None
     for key in keys:
-        if key.type == OBJECT_CATALOG:
+        if key.type == restypes.OBJECT_CATALOG:
             continue  # rooms list their objects' catalog keys; the objects cover those
         build.add(TrayRef(RefKind.BUILD, key.instance, type_id=key.type, res_group=key.group),
                   "Build")

@@ -13,7 +13,7 @@ from enum import Enum
 from traytrim import restypes
 from traytrim.dbpf import ResourceKey
 from traytrim.index import GameHit, ModsHit, ResourceIndex
-from traytrim.tray import HouseholdContents, RefKind, TrayRef
+from traytrim.tray import BODY_TYPES, HouseholdContents, RefKind, TrayRef
 
 # The resource type each kind of tray reference points to. None: not verified, so any resource
 # with the instance is accepted and the result is marked approximate.
@@ -109,6 +109,22 @@ def locate(contents: HouseholdContents, index: ResourceIndex,
             located.game += index.game_hits(key)
         located.mods.sort(key=lambda h: h.load_order)
     return sorted(merged.values(), key=lambda r: (r.ref.group, r.ref.kind.value, r.ref.instance))
+
+
+KIND_LABEL = {RefKind.SCULPT: "Sculpt", RefKind.SIM_MODIFIER: "Slider",
+              RefKind.SKIN_TONE: "Skin tone", RefKind.PELT_LAYER: "Coat layer",
+              RefKind.CUSTOM_TATTOO: "Custom tattoo", RefKind.OBJECT: "Object"}
+
+
+def ref_label(ref: TrayRef) -> str:
+    """What the item is, in a word or two: "Hair", "Slider", "Object", "Wall"."""
+    if ref.kind is RefKind.CAS_PART:
+        return BODY_TYPES.get(ref.body_type, "CAS part")
+    if ref.kind is RefKind.BUILD:
+        if ref.type_id in restypes.BUILD_NAMES:
+            return restypes.BUILD_NAMES[ref.type_id]
+        return "Model" if ref.type_id == restypes.MODEL else "Build item"
+    return KIND_LABEL.get(ref.kind, ref.kind.value)
 
 
 def default_excluded(contents: HouseholdContents, refs: list[LocatedRef]) -> set[TrayRef]:

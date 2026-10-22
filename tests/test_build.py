@@ -259,7 +259,8 @@ def test_lot_plan_takes_whole_objects_and_leaves_ea_overrides_out(tmp_path, tray
                                         (ResourceKey(restypes.RLE2, 0, 0x77), b"unrelated")])
     sofa = ResourceKey(restypes.OBJECT_DEFINITION, 0, EA_SOFA)
     write(mods / "unlock sofa.package", [(sofa, b"unlocked")])
-    write(mods / "walls.package", [(WALL, b"wall")])
+    write(mods / "walls.package", [(WALL, b"wall"),
+                                   (ResourceKey(restypes.OBJECT_THUMB, 2, WALL.instance), b"jpeg")])
     write(game / "Data" / "Client" / "ClientFullBuild0.package", [(sofa, b"ea sofa"),
                                                                  (FLOOR, b"ea floor")])
     with ResourceIndex(tmp_path / "index.sqlite") as index:
@@ -269,6 +270,7 @@ def test_lot_plan_takes_whole_objects_and_leaves_ea_overrides_out(tmp_path, tray
         excluded = default_excluded(contents, refs)
         assert excluded == {TrayRef(RefKind.OBJECT, EA_SOFA)}
         plan = build_plan(refs, index, excluded)
+        assert not index.db.in_transaction  # the cross-package lookup only reads
     got = {(k.type, k.instance): r.via for k, r in plan.resources.items()}
     assert got == {
         (restypes.OBJECT_DEFINITION, CHAIR): "tray",
@@ -276,6 +278,7 @@ def test_lot_plan_takes_whole_objects_and_leaves_ea_overrides_out(tmp_path, tray
         (restypes.OBJECT_THUMB, CHAIR): "object",
         (restypes.MODEL, CHAIR_MODEL): "scan",
         (restypes.WALL, WALL.instance): "tray",
+        (restypes.OBJECT_THUMB, WALL.instance): "thumbnail",
     }
     by_kind = {r.ref: r for r in refs}
     assert by_kind[TrayRef(RefKind.OBJECT, LAMP)].where.name == "MISSING"
@@ -286,3 +289,13 @@ def test_lot_plan_takes_whole_objects_and_leaves_ea_overrides_out(tmp_path, tray
 def test_households_keep_their_default_replacements():
     contents = tray.HouseholdContents("Moreau", [], 2)
     assert default_excluded(contents, []) == set()
+
+
+def test_test_kit_helper_names_the_right_screen(tmp_path):
+    from pathlib import Path
+
+    from traytrim.export import _write_bats
+
+    _write_bats(tmp_path, Path("Sims 4"), "Seaside_TrayTrim.package", "lot")
+    bat = (tmp_path / "1_start_test.bat").read_text(encoding="utf-8")
+    assert "place the lot from the Library" in bat and "Create a Sim" not in bat

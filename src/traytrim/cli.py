@@ -11,7 +11,7 @@ from collections import Counter
 from pathlib import Path
 
 from traytrim import __version__, dbpf, paths, tray
-from traytrim.index import GAME, MODS, ResourceIndex, UpdateResult
+from traytrim.index import MODS, ResourceIndex, UpdateResult
 from traytrim.settings import Settings
 from traytrim.units import human_size
 
@@ -172,7 +172,7 @@ def cmd_tray_list(args: argparse.Namespace) -> int:
 
 
 def cmd_tray_show(args: argparse.Namespace) -> int:
-    from traytrim.resolve import locate, summarize
+    from traytrim.resolve import locate, ref_label, summarize
 
     folders = _folders(args)
     if folders.tray is None or not folders.tray.is_dir():
@@ -181,8 +181,8 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
     items, _failed = tray.scan_tray(folders.tray)
     item = _find_item(items, args.item)
     if item is None:
-        print(f"No single tray item matches {args.item!r}. `traytrim tray list` shows them.",
-              file=sys.stderr)
+        print(f"No single tray item matches {args.item!r}. `traytrim tray list --all` shows "
+              "them.", file=sys.stderr)
         return 1
     contents = tray.read_contents(item)
     with ResourceIndex() as ix:
@@ -191,7 +191,12 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         refs = locate(contents, ix)
 
     summary = summarize(refs)
-    print(f"{item.name}: {', '.join(sim.sim.name for sim in contents.sims)}")
+    if contents.kind == "household":
+        print(f"{item.name}: {', '.join(sim.sim.name for sim in contents.sims)}")
+    else:
+        print(f"{item.name} ({contents.kind})")
+        for note in contents.sims[0].notes:
+            print(f"Note: {note}")
     print(f"CC: {len(summary.cc)} items from {len(summary.packages)} packages. From the game: "
           f"{len(summary.game)}" + (f" ({', '.join(summary.packs)})" if summary.packs else "")
           + f". Missing: {len(summary.missing)}.")
@@ -201,7 +206,7 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         if r.ref.group != group:
             group = r.ref.group
             print(f"\n{group}")
-        label = tray.BODY_TYPES.get(r.ref.body_type, "") if r.ref.body_type is not None else ""
+        label = ref_label(r.ref)
         conflict = f"  [{len(r.mods)} copies, using the last]" if len(r.mods) > 1 else ""
         approx = "  [approximate]" if r.approximate else ""
         print(f"  {label:<14} {r.used.rel}{conflict}{approx}")
@@ -212,7 +217,8 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         from traytrim.resolve import default_excluded
         _print_plan(refs, default_excluded(contents, refs))
     if missing:
-        print("\nMissing (the Sim will look different without these)")
+        who = "the Sims look" if contents.kind == "household" else f"the {contents.kind} looks"
+        print(f"\nMissing ({who} different without these)")
         for r in missing:
             uses = "; ".join(f"{sim}: {', '.join(sorted(u))}" for sim, u in r.usage_by_name())
             print(f"  {r.ref.kind.value} {r.ref.instance:016X}  {uses}")
@@ -356,7 +362,8 @@ def build_parser() -> argparse.ArgumentParser:
     tray_list.set_defaults(func=cmd_tray_list)
     tray_show = tray_sub.add_parser("show", parents=[folder_args],
                                     help="show the CC a household uses")
-    tray_show.add_argument("item", help="tray id, household name, or part of a Sim's name")
+    tray_show.add_argument("item", help="tray id, a household, lot or room name, or part of a "
+                           "Sim's name")
     tray_show.add_argument("--verbose", "-v", action="store_true",
                            help="also show where each item is used")
     tray_show.add_argument("--plan", action="store_true",
@@ -367,9 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     export = sub.add_parser("export", parents=[folder_args],
                             help="export a household with only the CC it uses")
-    export.add_argument("item", help="tray id, household name, or part of a Sim's name")
+    export.add_argument("item", help="tray id, a household, lot or room name, or part of a "
+                        "Sim's name")
     export.add_argument("--out", help="folder for the zip (default: Desktop)")
-    export.add_argument("--name", help="file name start (default: the Sim or household name)")
+    export.add_argument("--name", help="file name start (default: the Sim's or the item's name)")
     export.add_argument("--no-test-kit", action="store_true",
                         help="don't make the in-game test folder")
     export.add_argument("--no-update", action="store_true", help="use the index as it is")

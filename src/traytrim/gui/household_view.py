@@ -12,13 +12,13 @@ from PySide6.QtWidgets import (QAbstractButton, QButtonGroup, QFrame, QGraphicsO
                                QPushButton, QScrollArea, QSizePolicy, QStackedWidget,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from traytrim import restypes, tray
+from traytrim import restypes
 from traytrim.gui import icons, theme
 from traytrim.gui.flow import FlowLayout
-from traytrim.gui.theme import RADIUS, SPACE, TYPE
+from traytrim.gui.theme import RADIUS, SPACE
 from traytrim.gui.widgets import ClampedText, label, link_button, set_role
 from traytrim.plan import Plan
-from traytrim.resolve import LocatedRef, Summary, summarize
+from traytrim.resolve import LocatedRef, Summary, ref_label, summarize
 from traytrim.tray import HouseholdContents, RefKind, TrayItem, TrayRef
 from traytrim.units import human_size, percent_smaller
 
@@ -29,9 +29,6 @@ THUMB = 124
 GROUP_ORDER = ["Hair", "Clothing", "Accessories", "Makeup", "Eyes", "Skin details", "Body",
                "Other CAS parts", "Skin tone", "Sculpts", "Sliders", "Custom tattoos",
                "Pet coat", "Objects", "Build"]
-KIND_LABEL = {RefKind.SCULPT: "Sculpt", RefKind.SIM_MODIFIER: "Slider",
-              RefKind.SKIN_TONE: "Skin tone", RefKind.PELT_LAYER: "Coat layer",
-              RefKind.CUSTOM_TATTOO: "Custom tattoo", RefKind.OBJECT: "Object"}
 # Kinds with a thumbnail in their package, and its resource type.
 THUMB_TYPES = {RefKind.CAS_PART: restypes.THUM, RefKind.OBJECT: restypes.OBJECT_THUMB,
                RefKind.BUILD: restypes.OBJECT_THUMB}
@@ -52,13 +49,7 @@ class HouseholdReport:
 
 
 def item_label(ref: LocatedRef) -> str:
-    if ref.ref.kind is RefKind.CAS_PART:
-        return tray.BODY_TYPES.get(ref.ref.body_type, "CAS part")
-    if ref.ref.kind is RefKind.BUILD:
-        if ref.ref.type_id in restypes.BUILD_NAMES:
-            return restypes.BUILD_NAMES[ref.ref.type_id]
-        return "Model" if ref.ref.type_id == restypes.MODEL else "Build item"
-    return KIND_LABEL.get(ref.ref.kind, ref.ref.kind.value)
+    return ref_label(ref.ref)
 
 
 def item_subtitle(item: TrayItem, with_price: bool = False) -> str:
@@ -904,12 +895,11 @@ class HouseholdView(QWidget):
                        for x in s.cc if x.ref in r.overrides]
             self._add_notice(Notice(
                 "info", "text_secondary",
-                f"{plural(n, 'game item')} changed by your mods "
-                f"{'is' if n == 1 else 'are'} left out",
-                f"Your mods replace {'this EA item' if n == 1 else 'these EA items'}, mostly to "
-                f"unlock or retune them, which rarely changes how the {r.noun} looks. "
-                "Exported, they'd change the item everywhere in the recipient's game. Click "
-                "one below to include it anyway.", details), "tray")
+                f"Your mods change {plural(n, 'EA item')} this {r.noun} uses",
+                "Mostly to unlock or retune them, which rarely changes how it looks. Exported, "
+                f"{'it' if n == 1 else 'they'}'d change the item everywhere in the recipient's "
+                f"game, so {'it starts' if n == 1 else 'they start'} out of the export. To "
+                "include one, click its card (marked Not exported).", details), "tray")
         for note in (r.contents.sims[0].notes if r.contents.sims else []):
             self._add_notice(Notice("info", "text_secondary", "Partly read", note), "tray")
 

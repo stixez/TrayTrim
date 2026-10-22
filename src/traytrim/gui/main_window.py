@@ -364,11 +364,11 @@ class MainWindow(QMainWindow):
         self._full_report = report
         self._show_report(report)
         known = self.household.thumbnails()
-        wanted: dict[int, list[int]] = {}  # thumbnail type -> instances
+        wanted: dict[int, set[int]] = {}  # thumbnail type -> instances
         for r in report.refs:
             thumb_type = THUMB_TYPES.get(r.ref.kind)
             if r.where is Where.CC and thumb_type and r.ref.instance not in known:
-                wanted.setdefault(thumb_type, []).append(r.ref.instance)
+                wanted.setdefault(thumb_type, set()).add(r.ref.instance)
         instance = report.item.instance
         if not wanted:
             self.household.set_thumbnails(instance, {}, True)
@@ -379,8 +379,8 @@ class MainWindow(QMainWindow):
             images = {}
             with ResourceIndex() as ix:
                 for thumb_type, instances in wanted.items():
-                    images.update(load_thumbnails(ix, instances, thumb_type, THUMB * 2,
-                                                  user_dir))
+                    images.update(load_thumbnails(ix, sorted(instances), thumb_type,
+                                                  THUMB * 2, user_dir))
             return images
 
         run_in_background(work, lambda images: self.household.set_thumbnails(instance, images),
