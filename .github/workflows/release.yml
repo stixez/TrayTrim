@@ -63,7 +63,13 @@ jobs:
       - run: python -m pytest
       - run: python packaging/build.py
       - name: The built app starts
-        run: TRAYTRIM_SMOKE_TEST=1 timeout 60 dist/TrayTrim.app/Contents/MacOS/TrayTrim
+        # macOS has no `timeout`: give the app 60 seconds to quit by itself.
+        run: |
+          TRAYTRIM_SMOKE_TEST=1 dist/TrayTrim.app/Contents/MacOS/TrayTrim &
+          pid=$!
+          for _ in $(seq 60); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+          if kill -0 "$pid" 2>/dev/null; then kill "$pid"; echo "TrayTrim didn't quit"; exit 1; fi
+          wait "$pid"
       - name: Zip the app
         run: |
           version=$(python -c "import traytrim; print(traytrim.__version__)")
