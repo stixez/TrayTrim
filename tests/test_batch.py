@@ -118,3 +118,28 @@ def test_check_zip_finds_damage_and_changes(tmp_path, index, tray_dir):  # noqa:
 
     missing = check_zip(tmp_path / "gone.zip")
     assert not missing.ok and missing.checks[0].name == "The zip opens"
+
+
+def test_check_zip_reports_damaged_compressed_files_and_foreign_zips(tmp_path, index,
+                                                                    tray_dir):  # noqa: F811
+    lot = items_by_kind(tray_dir)["lot"]
+    [outcome] = export_many([lot], ExportOptions(tmp_path / "out", "", False), index)
+    good = outcome.result.zip_path
+    with zipfile.ZipFile(good) as z:
+        info = z.getinfo("report.json")
+        assert info.compress_type == zipfile.ZIP_DEFLATED
+        start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
+    data = bytearray(good.read_bytes())
+    for i in range(start + 10, start + 30):
+        data[i] ^= 0x5A
+    broken = tmp_path / "broken.zip"
+    broken.write_bytes(bytes(data))
+    result = check_zip(broken)  # must not raise zlib.error
+    assert result.checks[0].name == "The zip is intact" and not result.checks[0].passed
+    assert any("report.json" in p for p in result.checks[0].problems)
+
+    foreign = tmp_path / "photos.zip"
+    with zipfile.ZipFile(foreign, "w") as z:
+        z.writestr("holiday.jpg", b"jpeg")
+    [only] = check_zip(foreign).checks
+    assert only.name == "It's a TrayTrim export" and not only.passed

@@ -9,6 +9,8 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
+from traytrim.errors import describe_error  # noqa: F401  (re-exported for the GUI)
+
 # Tasks stay referenced here until their worker is done, so they never depend on a parent
 # widget being alive (closing the window mid-task must not delete what the worker reports to).
 _live: set[BackgroundTask] = set()
@@ -97,13 +99,6 @@ class _Job(QRunnable):
                 _emit(task.finished, result)
         finally:
             _emit(task._done)
-
-
-def describe_error(error: BaseException) -> str:
-    """A short reason for the user: the OS message for file errors, else the error text."""
-    if isinstance(error, OSError) and error.strerror:
-        return error.strerror
-    return str(error) or type(error).__name__
 
 
 def run_in_background(fn: Callable[[], Any], on_done: Callable[[Any], None],

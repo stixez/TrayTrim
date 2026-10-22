@@ -470,7 +470,7 @@ class MainWindow(QMainWindow):
                                 default_base_name(report.item, report.contents,
                                                   report.sim_ids),
                                 self.folders.user_dir, self.folders.game_dir)
-        ExportDialog(request, self.settings, self).exec()
+        self._run_dialog(ExportDialog(request, self.settings, self))
 
     def _kind_items(self) -> list[tray.TrayItem]:
         return [i for i in self.trays.source.items if i.type == self._kind[1]]
@@ -490,11 +490,18 @@ class MainWindow(QMainWindow):
                                       self._excluded.get(i.instance)) for i in items
                    if i.instance in self._sim_choice or i.instance in self._excluded}
         selected = self._selected.instance if self._selected is not None else None
-        BatchDialog(items, self._kind[3], choices, self.settings, self.folders.user_dir,
-                    self.folders.game_dir, selected, self).exec()
+        self._run_dialog(BatchDialog(items, self._kind[3], choices, self.settings,
+                                     self.folders.user_dir, self.folders.game_dir, selected,
+                                     self))
 
     def _show_history(self) -> None:
-        HistoryDialog(self).exec()
+        self._run_dialog(HistoryDialog(self))
+
+    @staticmethod
+    def _run_dialog(dialog) -> None:
+        """Show a dialog and free it afterwards (a parented dialog otherwise lives on)."""
+        dialog.exec()
+        dialog.deleteLater()
 
     def _on_plan_failed(self, gen: int, instance: int, error: Exception) -> None:
         if gen == self._plan_gen:

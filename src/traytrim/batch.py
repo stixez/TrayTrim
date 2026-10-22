@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from typing import Callable
 
 from traytrim import tray
+from traytrim.errors import describe_error
 from traytrim.export import ExportOptions, ExportResult, default_base_name, export_household
 from traytrim.index import ResourceIndex
 from traytrim.plan import Cancelled, Plan, build_plan
@@ -44,10 +45,11 @@ def prepare(item: TrayItem, index: ResourceIndex, choice: Choice | None = None,
     all_ids = {s.sim.sim_id for s in contents.sims}
     sim_ids = (choice.sim_ids & all_ids if choice.sim_ids else set()) or all_ids
     refs = locate(contents, index)
-    if sim_ids != all_ids:
-        refs = for_sims(refs, sim_ids)
+    # Defaults from every Sim's references, as the app's detail view works them out.
     excluded = (choice.excluded if choice.excluded is not None
                 else default_excluded(contents, refs))
+    if sim_ids != all_ids:
+        refs = for_sims(refs, sim_ids)
     plan = build_plan(refs, index, excluded, progress, cancel)
     gameplay = gameplay_mods(contents, index, sim_ids)
     return Prepared(item, contents, refs, plan, gameplay, sim_ids,
@@ -77,10 +79,13 @@ BatchProgress = Callable[[int, str, int, int], None]
 def export_many(items: list[TrayItem], options: ExportOptions, index: ResourceIndex,
                 choices: dict[int, Choice] | None = None,
                 progress: BatchProgress | None = None,
-                cancel: threading.Event | None = None) -> list[Outcome]:
+                cancel: threading.Event | None = None,
+                on_outcome: Callable[[int, Outcome], None] | None = None) -> list[Outcome]:
     """Export each item to its own zip in options.out_dir, named after the item. One that fails
     doesn't stop the others; a cancel stops after nothing more is saved (the item in progress
-    leaves nothing behind) and returns the outcomes so far."""
+    leaves nothing behind) and returns the outcomes so far. on_outcome(position, outcome) is
+    called as soon as each one is final, so a caller knows what was saved even if something
+    goes wrong later."""
     choices = choices or {}
     outcomes: list[Outcome] = []
 
@@ -106,13 +111,9 @@ def export_many(items: list[TrayItem], options: ExportOptions, index: ResourceIn
         except Exception as e:  # one item's problem is reported, the rest still export
             if cancel is not None and cancel.is_set():
                 break
-            outcome.error = _reason(e)
+            outcome.error = describe_error(e)
         outcomes.append(outcome)
+        if on_outcome is not None:
+            on_outcome(position, outcome)
         report(position, "done", 1, 1)
     return outcomes
-
-
-def _reason(error: BaseException) -> str:
-    if isinstance(error, OSError) and error.strerror:
-        return error.strerror
-    return str(error) or type(error).__name__

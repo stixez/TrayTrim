@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QDialog, QFileDialog, QFrame, QGridLayout,
                                QHBoxLayout, QProgressBar, QPushButton, QScrollArea,
@@ -138,8 +138,6 @@ class PickRow(QAbstractButton):
 
 class BatchDialog(QDialog):
     """Pick items of one kind, export each to its own zip, and show how each one went."""
-
-    exported = Signal()  # at least one zip was saved (the history changed)
 
     def __init__(self, items: list[TrayItem], noun: str, choices: dict[int, Choice],
                  settings: Settings, user_dir: Path | None, game_dir: Path | None,
@@ -350,18 +348,22 @@ class BatchDialog(QDialog):
         options = ExportOptions(self.out_dir, "", self.kit_chip.isChecked(), self.user_dir,
                                 self.game_dir)
         choices = self.choices
+        # Filled by the worker as each export is final (list.append is atomic), so whatever
+        # ends the run, the rows show what was really saved.
+        self._outcomes: list[Outcome] = []
+        collected = self._outcomes
 
-        def work(task: BackgroundTask) -> list[Outcome]:
+        def work(task: BackgroundTask) -> None:
             with ResourceIndex() as ix:
-                return export_many(items, options, ix, choices,
-                                   lambda *args: task.report(*args, force=args[1] == "done"),
-                                   task.cancelled)
+                export_many(items, options, ix, choices,
+                            lambda *args: task.report(*args, force=args[1] == "done"),
+                            task.cancelled, lambda _position, o: collected.append(o))
 
         task = BackgroundTask(work, keep_late_result=True)
         task.progress.connect(self._on_progress)
-        task.finished.connect(self._finished)
-        task.failed.connect(self._failed)
-        task.aborted.connect(lambda: self._finished([]))
+        task.finished.connect(lambda _none: self._show_outcomes())
+        task.failed.connect(self._show_outcomes)
+        task.aborted.connect(self._show_outcomes)
         self._task = task
         task.start()
 
@@ -380,9 +382,9 @@ class BatchDialog(QDialog):
             share = {"package": 0.2, "verify": 0.6, "zip": 0.9}[step]
         self.bar.setValue(position * 100 + int(share * 100))
 
-    def _finished(self, outcomes: list[Outcome]) -> None:
+    def _show_outcomes(self, error: Exception | None = None) -> None:
         self._task = None
-        by_item = {id(o.item): o for o in outcomes}
+        by_item = {id(o.item): o for o in self._outcomes}
         saved = verified = 0
         for row in self._running:
             o = by_item.get(id(row.item))
@@ -403,16 +405,19 @@ class BatchDialog(QDialog):
                 row.set_status(f"Failed: {o.error}", ("alert", "danger_text"))
                 row.setToolTip(o.error)
         n = len(self._running)
-        if verified == n:
+        if error is not None:
+            self.title.setText("The exports stopped")
+        elif verified == n:
             self.title.setText(f"{plural(n, self.noun[:-1], self.noun)} exported and verified"
                                if n > 1 else "Exported and verified")
         else:
             self.title.setText(f"{saved} of {n} exported")
         failed = saved - verified
-        self.intro.setText(
-            f"Each zip is in {self.out_dir}." + (f" {plural(failed, 'export')} saved with a "
-                                                 "failed check: open its report.json for the "
-                                                 "details." if failed else ""))
+        where = f"Each zip is in {self.out_dir}." if saved else "Nothing was saved."
+        if error is not None:
+            where = f"{describe_error(error)}. {where}"
+        self.intro.setText(where + (f" {plural(failed, 'export')} saved with a failed check: "
+                                    "open its report.json for the details." if failed else ""))
         self.bar.setValue(self.bar.maximum())
         if saved:
             self.settings.output_dir = str(self.out_dir)
@@ -420,18 +425,8 @@ class BatchDialog(QDialog):
                 self.settings.save()
             except OSError:
                 pass
-            self.exported.emit()
         self.pages.setCurrentIndex(2)
         self.done_button.setFocus()
-
-    def _failed(self, error: Exception) -> None:
-        self._task = None
-        for row in self._running:
-            row.set_status("Not exported", ("excluded", "text_tertiary"))
-        self.title.setText("The exports stopped")
-        self.intro.setText(f"{describe_error(error)}. Zips already listed as verified were "
-                           "saved; the rest weren't.")
-        self.pages.setCurrentIndex(2)
 
     def _stop(self) -> None:
         if self._task is not None:

@@ -19,6 +19,10 @@ from traytrim.units import human_size
 from traytrim.verify import Verification, check_zip
 
 
+# English month names whatever the system locale (strftime's %b follows it); the UI is English.
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
 def when_text(stamp: str, now: datetime | None = None) -> str:
     """"Today, 23:16", "Yesterday, 09:02" or "3 Oct 2026, 14:00"."""
     try:
@@ -28,7 +32,7 @@ def when_text(stamp: str, now: datetime | None = None) -> str:
     now = now or datetime.now()
     days = (now.date() - t.date()).days
     day = ("Today" if days == 0 else "Yesterday" if days == 1
-           else f"{t.day} {t.strftime('%b')} {t.year}")
+           else f"{t.day} {_MONTHS[t.month - 1]} {t.year}")
     return f"{day}, {t:%H:%M}"
 
 
@@ -74,12 +78,7 @@ class HistoryRow(QWidget):
         col.addWidget(self.result)
 
     def _clear_result(self) -> None:
-        while self.result_col.count():
-            item = self.result_col.takeAt(0)
-            if item.widget() is not None:
-                item.widget().deleteLater()
-            elif item.layout() is not None:
-                _delete_layout(item.layout())
+        _delete_layout(self.result_col)
 
     def _line(self, icon: str, token: str, title: str, detail: str = "") -> None:
         row = QHBoxLayout()
@@ -97,8 +96,7 @@ class HistoryRow(QWidget):
         self.result_col.addWidget(label("Checking", "secondary"))
         self.result.show()
         path = self.zip
-        task = BackgroundTask(lambda t: check_zip(path, lambda d, n: t.report(d, n),
-                                                  t.cancelled))
+        task = BackgroundTask(lambda t: check_zip(path, t.report, t.cancelled))
         task.progress.connect(self._progress)
         task.finished.connect(self._checked)
         task.failed.connect(self._failed)
@@ -106,10 +104,12 @@ class HistoryRow(QWidget):
         task.start()
 
     def _progress(self, args: tuple) -> None:
-        done, total = args
+        step, done, total = args
         item = self.result_col.itemAt(0)
         if item is not None and item.widget() is not None:
-            item.widget().setText(f"Checking: {done:,} of {total:,} files")
+            item.widget().setText(
+                f"Reading the zip: {done * 100 // max(total, 1)}%" if step == "read"
+                else f"Checking: {done:,} of {total:,} files")
 
     def _checked(self, verification: Verification) -> None:
         self._task = None

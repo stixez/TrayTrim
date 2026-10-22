@@ -16,12 +16,14 @@ import json
 import tempfile
 import threading
 import zipfile
+import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from traytrim import dbpf, restypes
 from traytrim.dbpf import ResourceKey
+from traytrim.errors import describe_error
 from traytrim.index import ResourceIndex
 from traytrim.plan import Cancelled, Plan, open_packages
 from traytrim.references import LEAF_TYPES, ReferenceError_, references
@@ -145,39 +147,70 @@ def verify_export(package_path: Path, plan: Plan, refs: list[LocatedRef], index:
     return Verification(checks)
 
 
-def check_zip(zip_path: Path, progress: Progress | None = None,
+# progress(step, done, total) for check_zip: step "read" counts bytes of the package copied
+# out of the zip, "files" counts resources decompressed.
+CheckProgress = Callable[[str, int, int], None]
+_ZIP_ERRORS = (OSError, EOFError, zipfile.BadZipFile, zlib.error)
+
+
+def check_zip(zip_path: Path, progress: CheckProgress | None = None,
               cancel: threading.Event | None = None) -> Verification:
     """Check an earlier export on its own, without the Mods folder it came from (which may have
     changed since): the zip is intact, its package reads back, and both still match the
-    report.json written with it."""
-    checks: list[Check] = []
+    report.json written with it. The package is copied out of the zip once (its checksum is
+    checked on the way) into a temporary folder, then read from there."""
     try:
         z = zipfile.ZipFile(zip_path)
-    except (OSError, zipfile.BadZipFile) as e:
-        reason = e.strerror if isinstance(e, OSError) and e.strerror else str(e)
-        return Verification([Check("The zip opens", False, f"It can't be read: {reason}.")])
-    with z, tempfile.TemporaryDirectory(prefix="traytrim-check-") as tmp:
+    except _ZIP_ERRORS as e:
+        return Verification([Check("The zip opens", False,
+                                   f"It can't be read: {describe_error(e)}.")])
+    with z, tempfile.TemporaryDirectory(prefix="traytrim-check-",
+                                        ignore_cleanup_errors=True) as tmp:
         names = z.namelist()
         packages = [n for n in names if n.startswith("Mods/") and n.endswith(".package")]
+        if len(packages) != 1 or "report.json" not in names:
+            return Verification([Check(
+                "It's a TrayTrim export", False,
+                "It doesn't hold one package and a report.json, like a TrayTrim export.")])
+
+        damaged: list[str] = []
+        for name in names:  # the small files; the package is checked while it's copied
+            if name == packages[0]:
+                continue
+            try:
+                with z.open(name) as f:
+                    while f.read(1 << 20):
+                        pass
+            except _ZIP_ERRORS as e:
+                damaged.append(f"{name}: {describe_error(e)}")
+        package = Path(tmp) / "export.package"
+        info = z.getinfo(packages[0])
         try:
-            bad = z.testzip()
-        except (OSError, zipfile.BadZipFile, EOFError) as e:
-            bad = f"Its index ({e})"
-        checks.append(Check(
-            "The zip is intact", bad is None and len(packages) == 1 and "report.json" in names,
-            "Every file in it reads back with the checksum it was saved with."
-            if bad is None else f"{bad} is damaged.",
-            [] if len(packages) == 1 and "report.json" in names
-            else ["It doesn't hold one package and a report.json, like a TrayTrim export."]))
-        if not checks[0].passed:
+            with z.open(info) as src, open(package, "wb") as dst:
+                copied = 0
+                while chunk := src.read(4 << 20):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled
+                    dst.write(chunk)
+                    copied += len(chunk)
+                    if progress:
+                        progress("read", copied, info.file_size)
+        except _ZIP_ERRORS as e:
+            damaged.append(f"{packages[0]}: {describe_error(e)}")
+        checks = [Check(
+            "The zip is intact", not damaged,
+            "Every file in it reads back with the checksum it was saved with." if not damaged
+            else f"{_plural(len(damaged), 'file')} in it {'is' if len(damaged) == 1 else 'are'}"
+            " damaged.", damaged)]
+        if damaged:
             return Verification(checks)
 
-        package = Path(z.extract(packages[0], tmp))
         problems: list[str] = []
         try:
             pkg = dbpf.Package(package)
         except (dbpf.DbpfError, OSError) as e:
-            checks.append(Check("The package reads back", False, f"It can't be opened: {e}"))
+            checks.append(Check("The package reads back", False,
+                                f"It can't be opened: {describe_error(e)}"))
             return Verification(checks)
         with pkg:
             entries = list(pkg)
@@ -189,7 +222,7 @@ def check_zip(zip_path: Path, progress: Progress | None = None,
                 except dbpf.DbpfError as e:
                     problems.append(f"{entry.key}: {e}")
                 if progress and (done % 50 == 0 or done == len(entries)):
-                    progress(done, len(entries))
+                    progress("files", done, len(entries))
         checks.append(Check(
             "The package reads back", not problems,
             f"{_plural(len(entries), 'file')}, each decompresses." if not problems
