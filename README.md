@@ -35,7 +35,10 @@ packages they live in, writes them into one package next to the tray files, and 
 - **Follows every file the CC needs**: meshes, textures in any format, thumbnails, slider shapes,
   across packages, so recolors that need a separate mesh still work.
 - **Takes the copy the game uses** when the same file is in your Mods more than once with
-  different content, and tells you which one and why.
+  different content, tells you which one and why, and lets you pick another.
+- **Shows what everything is**: CC by its own name ("Driftwood Rattan Chair", "Soft Bob"), with
+  its thumbnail, searchable and sortable by category, size or name. Lots, rooms and households
+  show their own tray picture.
 - **Lets you leave things out** with a click, and export only some Sims of a household. The size
   updates as you go.
 - **Never copies game content.** Items from the base game and packs stay out; the report lists the
@@ -46,8 +49,9 @@ packages they live in, writes them into one package next to the tray files, and 
   replacements, are listed in the export's README.
 - **Prepares an in-game test**: a folder with only the export and steps to try it in your game
   with nothing else installed, then put your Mods back.
-- **Exports several at once**, one verified zip each, and keeps a history of your exports. Any
-  earlier zip can be checked again later, without the Mods folder it came from.
+- **Exports several at once**, one verified zip each, or together in one zip that shares one
+  package, like a lot with the household that lives there. A history keeps every export, and any
+  earlier zip can be checked again later without the Mods folder it came from.
 
 <table>
   <tr>
@@ -59,12 +63,16 @@ packages they live in, writes them into one package next to the tray files, and 
     <td><img src="docs/screenshots/verified-light.png" alt="A verified export"></td>
   </tr>
   <tr>
+    <td><img src="docs/screenshots/lot-light.png" alt="A lot with its picture, notices and a copy to choose"></td>
+    <td><img src="docs/screenshots/lot-search.png" alt="Searching a lot's CC, largest first"></td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/household-dark.png" alt="Dark theme"></td>
     <td><img src="docs/screenshots/list-view.png" alt="CC as a list"></td>
   </tr>
 </table>
 
-<sub>Screenshots use an invented household and invented CC.</sub>
+<sub>Screenshots use invented households, an invented lot and invented CC.</sub>
 
 ## Download
 
@@ -72,8 +80,16 @@ packages they live in, writes them into one package next to the tray files, and 
 [Releases](https://github.com/stixez/TrayTrim/releases) page. It installs for your user only, no
 administrator rights needed, and uninstalls from Windows Settings. A portable zip is there too.
 
-**macOS and Linux (Steam/Proton):** run it from source for now (below). The code is cross-platform
-and its tests run on Windows, macOS and Linux; packaged builds will follow.
+**macOS (Apple silicon):** get `TrayTrim-<version>-macos-arm64.zip`, unzip it and move TrayTrim
+to Applications. The app isn't signed by Apple yet, so the first time, right-click it and choose
+Open. On an Intel Mac, run it from source (below).
+
+**Linux (Steam/Proton):** get `TrayTrim-<version>-linux-x86_64.tar.gz`, unpack it and run
+`TrayTrim/TrayTrim`. It finds the Sims 4 folders inside Proton's prefix; if it doesn't, choose
+them in the status bar.
+
+The Windows build is tested on a real Sims 4 install; the macOS and Linux builds are built and
+started on each release by CI, but haven't been tried with the game yet. Reports are welcome.
 
 ## Safety
 
@@ -117,7 +133,7 @@ Conflict notices say so.
 - Changes that affect every Sim and aren't referenced from the tray files can't be found: default
   replacements of skin, eyes or bodies that the Sims don't wear directly, and script mods. The
   recipient needs those separately.
-- Sims living on a lot aren't part of a lot export; export their household on its own.
+- Sims living on a lot aren't part of a lot export; export the lot and their household together.
 - CC names (string tables) aren't exported; CAS shows the items without them.
 - Many CC creators don't allow re-uploading their work. Exports are meant for your own backups and
   transfers, or for CC you have the rights to share.
