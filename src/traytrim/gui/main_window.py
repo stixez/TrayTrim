@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
@@ -15,7 +15,9 @@ from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QHBoxLayout, Q
 
 from traytrim import paths, tray
 from traytrim.gui.gallery import PORTRAIT, TrayList
-from traytrim.gui.household_view import THUMB, THUMB_TYPES, HouseholdReport, HouseholdView
+from traytrim.gui.describe import THUMB_TYPES
+from traytrim.gui.household_view import HouseholdReport, HouseholdView
+from traytrim.gui.report_parts import THUMB
 from traytrim.gui.images import load_portraits, load_thumbnails, load_tray_pictures
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
 from traytrim.gui import icons, theme

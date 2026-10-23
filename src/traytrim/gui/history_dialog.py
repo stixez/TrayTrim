@@ -11,10 +11,9 @@ from PySide6.QtWidgets import (QDialog, QFrame, QHBoxLayout, QPushButton, QScrol
 
 from traytrim.export import load_history
 from traytrim.gui import system
-from traytrim.gui.household_view import IconLabel
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import label, link_button
+from traytrim.gui.widgets import IconLabel, label, link_button
 from traytrim.units import human_size
 from traytrim.verify import Verification, check_zip
 
@@ -196,7 +195,7 @@ class HistoryDialog(QDialog):
         outer.addSpacing(SPACE["s"])
         outer.addLayout(buttons)
 
-    def done(self, result: int) -> None:  # noqa: D401 (Qt naming)
+    def done(self, result: int) -> None:
         for row in self.rows:
             row.stop()
         super().done(result)

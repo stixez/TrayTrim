@@ -24,7 +24,8 @@ import re
 import struct
 import zlib
 from dataclasses import dataclass
-from typing import BinaryIO, Iterator
+from typing import BinaryIO
+from collections.abc import Iterator
 
 HEADER_SIZE = 96
 MAGIC = b"DBPF"
@@ -41,7 +42,7 @@ _U32 = 0xFFFFFFFF
 _U64 = 0xFFFFFFFFFFFFFFFF
 _MAX_PACKAGE_SIZE = _U32  # offsets in the index are 32-bit
 _HEX = r"(?:0[xX])?([0-9A-Fa-f]{1,%d})"
-_KEY_RE = re.compile(r"%s[:-]%s[:-]%s" % (_HEX % 8, _HEX % 8, _HEX % 16))
+_KEY_RE = re.compile(rf"{_HEX % 8}[:-]{_HEX % 8}[:-]{_HEX % 16}")
 
 
 class DbpfError(ValueError):
@@ -200,7 +201,7 @@ class Package:
     def __init__(self, path: str | os.PathLike[str]):
         self.path = os.fspath(path)
         self._name = os.path.basename(self.path)
-        self._file: BinaryIO = open(self.path, "rb")
+        self._file: BinaryIO = open(self.path, "rb")  # noqa: SIM115 - closed in close()
         try:
             self.size = os.fstat(self._file.fileno()).st_size
             self.header, idx = _read_header_and_index(self._file, self.size, self._name)
@@ -416,7 +417,7 @@ class PackageWriter:
     def __init__(self, path: str | os.PathLike[str]):
         self.path = os.fspath(path)
         self._partial = self.path + ".partial"
-        self._file: BinaryIO = open(self._partial, "wb")
+        self._file: BinaryIO = open(self._partial, "wb")  # noqa: SIM115 - closed in close()
         self._file.write(bytes(HEADER_SIZE))
         self._pos = HEADER_SIZE
         self._entries: list[IndexEntry] = []

@@ -88,7 +88,7 @@ def test_export_writes_verified_zip_and_test_kit(tmp_path, household):
 
 
 def test_verification_catches_a_changed_or_missing_file(tmp_path, household):
-    index, item, contents, refs = household
+    index, _item, _contents, refs = household
     plan = build_plan(refs, index)
     # A package with one resource changed and another left out.
     victim, dropped = sorted(plan.resources)[:2]

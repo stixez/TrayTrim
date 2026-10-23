@@ -276,10 +276,9 @@ def test_refpack_longer_than_header_says_is_stopped():
 
 def test_failed_write_leaves_no_file(tmp_path):
     out = tmp_path / "x.package"
-    with pytest.raises(RuntimeError):
-        with PackageWriter(out) as w:
-            w.add(ResourceKey(CASP, 0, 1), b"a")
-            raise RuntimeError("export failed")
+    with pytest.raises(RuntimeError), PackageWriter(out) as w:
+        w.add(ResourceKey(CASP, 0, 1), b"a")
+        raise RuntimeError("export failed")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -296,9 +295,8 @@ def test_close_is_idempotent_and_blocks_further_adds(tmp_path):
 
 def test_oversized_resource_is_refused_before_writing(tmp_path, monkeypatch):
     monkeypatch.setattr(dbpf, "_MAX_PACKAGE_SIZE", 200)
-    with PackageWriter(tmp_path / "x.package") as w:
-        with pytest.raises(DbpfError, match="larger than 4 GB"):
-            w.add_raw(ResourceKey(CASP, 0, 1), bytes(150), COMP_NONE, 150)
+    with PackageWriter(tmp_path / "x.package") as w, pytest.raises(DbpfError, match="larger than 4 GB"):
+        w.add_raw(ResourceKey(CASP, 0, 1), bytes(150), COMP_NONE, 150)
 
 
 def test_entries_without_an_index_are_rejected(tmp_path):

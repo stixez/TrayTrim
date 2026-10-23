@@ -181,6 +181,8 @@ Bug reports and pull requests are welcome. Three rules keep TrayTrim trustworthy
 - No real CC, game or tray files in the repo; tests build small synthetic ones. `pytest` runs on
   Windows, macOS and Linux in CI.
 
+CI also runs `ruff check src tests` (the rules are in `pyproject.toml`).
+
 ## License and credits
 
 TrayTrim is released under the [MIT License](LICENSE).

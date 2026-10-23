@@ -301,7 +301,7 @@ def test_test_kit_helper_names_the_right_screen(tmp_path):
     assert "place the lot from the Library" in bat and "Create a Sim" not in bat
 
 
-def test_tray_pictures_are_unscrambled(tmp_path, tray_dir):  # noqa: F811
+def test_tray_pictures_are_unscrambled(tmp_path, tray_dir):
     jpeg = bytes([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]) + b"JFIF picture data" + bytes([0xFF, 0xD9])
     key = bytes.fromhex("4125e6cd47bab21a")
     body = bytes(b ^ key[i % 8] for i, b in enumerate(jpeg))

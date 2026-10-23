@@ -149,14 +149,14 @@ def test_excluded_items_and_missing_dependencies(world, tmp_path):
 
 
 def test_damaged_mesh_is_reported_not_fatal(tmp_path):
-    from traytrim.references import ReferenceError_
+    from traytrim.references import ReferenceParseError
 
     good = geom_bytes([ResourceKey(restypes.DST, 0, 7)])
     # Claim two chunks but end right after the first chunk-table entry.
     damaged = struct.pack("<5I", 3, 1, 0, 0, 2) + good[20:20 + 32 + 8]
-    with pytest.raises(ReferenceError_):
+    with pytest.raises(ReferenceParseError):
         geom_keys(damaged)
     key = ResourceKey(restypes.GEOM, CC, 1)
     cut = good[:-6]  # key list cut short
-    with pytest.raises(ReferenceError_):
+    with pytest.raises(ReferenceParseError):
         references(key, cut, {})

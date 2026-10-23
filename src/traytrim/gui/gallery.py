@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QListView, QStyle, QStyledItem
 
 from traytrim import tray
 from traytrim.gui import icons, theme
-from traytrim.gui.household_view import item_subtitle
+from traytrim.gui.describe import item_subtitle
 from traytrim.gui.theme import RADIUS, SPACE, TYPE
 from traytrim.tray import TrayItem
 

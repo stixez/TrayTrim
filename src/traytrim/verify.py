@@ -19,14 +19,14 @@ import zipfile
 import zlib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from traytrim import dbpf, restypes
 from traytrim.dbpf import ResourceKey
 from traytrim.errors import describe_error
 from traytrim.index import ResourceIndex
 from traytrim.plan import Cancelled, Plan, open_packages
-from traytrim.references import LEAF_TYPES, ReferenceError_, references
+from traytrim.references import LEAF_TYPES, ReferenceParseError, references
 from traytrim.resolve import LocatedRef, Where
 
 Progress = Callable[[int, int], None]
@@ -110,7 +110,7 @@ def verify_export(package_path: Path, plan: Plan, refs: list[LocatedRef], index:
                 continue
             try:
                 found = references(entry.key, data, by_instance)
-            except ReferenceError_ as e:
+            except ReferenceParseError as e:
                 dangling.append(f"{entry.key}: its references can't be read ({e})")
                 continue
             for ref in found:

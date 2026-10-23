@@ -5,7 +5,8 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import Any, Callable
+from typing import Any
+from collections.abc import Callable
 
 from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal
 
@@ -98,7 +99,7 @@ class _Job(QRunnable):
         task = self._task
         try:
             result = task._fn(task)
-        except Exception as e:  # handed to the failed signal on the UI thread
+        except Exception as e:  # noqa: BLE001 - handed to the failed signal on the UI thread
             if task.cancelled.is_set():
                 _emit(task.aborted)
             else:

@@ -4,7 +4,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from traytrim.gui.theme import DARK, LIGHT  # noqa: E402
+from traytrim.gui.theme import DARK, LIGHT
 
 
 def luminance(hex_colour: str) -> float:

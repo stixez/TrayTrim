@@ -22,12 +22,12 @@ from collections import OrderedDict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterator
+from collections.abc import Callable, Iterator
 
 from traytrim import dbpf, restypes
 from traytrim.dbpf import ResourceKey
 from traytrim.index import ModsHit, ResourceIndex
-from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, LEAF_TYPES, ReferenceError_,
+from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, LEAF_TYPES, ReferenceParseError,
                                  large_values, references)
 from traytrim.resolve import LocatedRef, Where
 from traytrim.tray import RefKind, TrayRef
@@ -225,7 +225,7 @@ def build_plan(refs: list[LocatedRef], index: ResourceIndex,
             try:
                 data = packages.read(item.copy)
                 found = references(key, data, packages.keys(item.copy.path))
-            except (dbpf.DbpfError, ReferenceError_, OSError) as e:
+            except (dbpf.DbpfError, ReferenceParseError, OSError) as e:
                 plan.unreadable.append((key, item.copy.path, str(e)))
                 continue
             for r in found:

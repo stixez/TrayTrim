@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache, lru_cache
 from importlib import resources
 
 from PySide6.QtCore import QByteArray, QRectF, QSize, Qt
@@ -13,7 +13,7 @@ NAMES = ("search", "clear", "check", "chevron-right", "chevron-down", "alert", "
          "export", "copies", "excluded", "package")
 
 
-@lru_cache(maxsize=None)
+@cache
 def _svg(name: str) -> str:
     return (resources.files("traytrim.gui") / "assets" / "icons" / f"{name}.svg").read_text(
         encoding="utf-8")

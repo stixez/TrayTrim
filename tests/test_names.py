@@ -84,7 +84,7 @@ def test_item_names_from_packages(tmp_path):
         w.add(ResourceKey(restypes.OBJECT_CATALOG, 0, chair), catalog(0x11))
         w.add(wall, catalog(0x22))
         w.add(hair, casp("Me_yfHair_LongWaves_black_202401010000000000"))
-        w.add(french, stbl({0x11: "Chaise".encode(), 0x22: "Mur".encode()}))
+        w.add(french, stbl({0x11: b"Chaise", 0x22: b"Mur"}))
         w.add(english, stbl({0x11: b"Desk Chair"}))
     with ResourceIndex(tmp_path / "index.sqlite") as ix:
         ix.update(mods, tmp_path / "Game")

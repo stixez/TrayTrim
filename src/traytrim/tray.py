@@ -328,7 +328,7 @@ def read_tray_picture(path: Path) -> bytes:
         raise TrayError(f"{path.name} is too short.")
     if body.startswith(b"\xff\xd8\xff"):
         return body
-    key = bytes(a ^ b for a, b in zip(body[:8], _JFIF_START))
+    key = bytes(a ^ b for a, b in zip(body[:8], _JFIF_START, strict=True))
     repeated = (key * (len(body) // 8 + 1))[:len(body)]
     return (int.from_bytes(body, "little") ^ int.from_bytes(repeated, "little")).to_bytes(
         len(body), "little")

@@ -7,11 +7,11 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication
 
-from traytrim.gui.gallery import ItemRole, TrayList, subtitle  # noqa: E402
-from traytrim.settings import Settings  # noqa: E402
-from traytrim.tray import TrayItem, TraySim  # noqa: E402
+from traytrim.gui.gallery import ItemRole, TrayList, subtitle
+from traytrim.settings import Settings
+from traytrim.tray import TrayItem, TraySim
 
 
 @pytest.fixture(scope="module")
@@ -127,7 +127,7 @@ def test_batch_dialog_picking(app, tmp_path):
 
 
 def test_detail_view_search_sort_and_names(app, tmp_path):
-    from test_plan import located, world  # noqa: F401
+    from test_plan import located, world
     from traytrim.gui.household_view import HouseholdReport, HouseholdView
     from traytrim.names import ItemName
     from traytrim.tray import HouseholdContents, RefKind, SimContents

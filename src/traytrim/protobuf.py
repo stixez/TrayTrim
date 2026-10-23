@@ -8,7 +8,7 @@ the protobuf package and generated classes, fields are read by number with this 
 from __future__ import annotations
 
 import struct
-from typing import Iterator
+from collections.abc import Iterator
 
 VARINT, FIXED64, LEN, FIXED32 = 0, 1, 2, 5
 

@@ -17,10 +17,10 @@ from traytrim.export import ExportOptions, forbidden_reason
 from traytrim.gui import icons, system, theme
 from traytrim.gui.export_dialog import STEPS
 from traytrim.gui.gallery import subtitle
-from traytrim.gui.household_view import Notice, SimChip, plural
+from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import RADIUS, SPACE
-from traytrim.gui.widgets import ElidedLabel, label, link_button
+from traytrim.gui.widgets import ElidedLabel, Notice, SimChip, label, link_button
 from traytrim.index import ResourceIndex
 from traytrim.settings import Settings
 from traytrim.tray import TrayItem

@@ -88,9 +88,9 @@ def _from_cache(cache: Path, type_id: int, instances: set[int], size: int) -> di
         with dbpf.Package(cache) as pkg:
             best: dict[int, dbpf.IndexEntry] = {}
             for e in pkg:
-                if e.key.type == type_id and e.key.instance in instances:
-                    if e.key.instance not in best or e.mem_size > best[e.key.instance].mem_size:
-                        best[e.key.instance] = e
+                if (e.key.type == type_id and e.key.instance in instances
+                        and (e.key.instance not in best or e.mem_size > best[e.key.instance].mem_size)):
+                    best[e.key.instance] = e
             for instance, entry in best.items():
                 try:
                     image = _decode(pkg.read(entry), size)

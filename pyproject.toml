@@ -46,3 +46,16 @@ traytrim = ["gui/assets/**/*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# N: Qt overrides keep their camelCase names with `# noqa: N802`.
+select = ["E", "F", "W", "UP", "B", "SIM", "N", "RUF", "BLE"]
+# × is UI text; str enums are compared as strings; try/except/pass reads fine here.
+ignore = ["RUF001", "RUF002", "RUF005", "UP042", "SIM105", "SIM108", "N818"]
+
+[tool.ruff.lint.flake8-bugbear]
+extend-immutable-calls = ["PySide6.QtCore.QModelIndex"]

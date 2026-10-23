@@ -41,7 +41,7 @@ _MIN_SCAN_INSTANCE = 1 << 32
 _MAX_SCAN_BYTES = 4 << 20
 
 
-class ReferenceError_(ValueError):
+class ReferenceParseError(ValueError):
     pass
 
 
@@ -57,15 +57,15 @@ def is_null(key: ResourceKey) -> bool:
 
 def casp_keys(data: bytes) -> list[ResourceKey]:
     if len(data) < 8:
-        raise ReferenceError_("CAS part too short")
+        raise ReferenceParseError("CAS part too short")
     _version, offset = struct.unpack_from("<II", data, 0)
     p = 8 + offset
     if p >= len(data):
-        raise ReferenceError_("CAS part key list outside the resource")
+        raise ReferenceParseError("CAS part key list outside the resource")
     count = data[p]
     p += 1
     if p + 16 * count > len(data):
-        raise ReferenceError_("CAS part key list truncated")
+        raise ReferenceParseError("CAS part key list truncated")
     out = []
     for i in range(count):
         instance, group, type_id = struct.unpack_from("<QII", data, p + 16 * i)
@@ -75,11 +75,11 @@ def casp_keys(data: bytes) -> list[ResourceKey]:
 
 def geom_keys(data: bytes) -> list[ResourceKey]:
     if len(data) < 20:
-        raise ReferenceError_("mesh too short")
+        raise ReferenceParseError("mesh too short")
     _ver, _public, _unused, external, internal = struct.unpack_from("<5I", data, 0)
     p = 20
     if p + 16 * (internal + external) + 8 * internal > len(data):
-        raise ReferenceError_("mesh header truncated")
+        raise ReferenceParseError("mesh header truncated")
     out = []
     p += 16 * internal
     for i in range(external):
@@ -94,11 +94,11 @@ def geom_keys(data: bytes) -> list[ResourceKey]:
         _gver, tgi_offset, _tgi_size = struct.unpack_from("<III", chunk, 4)
         q = 12 + tgi_offset
         if q + 4 > len(chunk):
-            raise ReferenceError_("mesh key list outside the chunk")
+            raise ReferenceParseError("mesh key list outside the chunk")
         count = struct.unpack_from("<I", chunk, q)[0]
         q += 4
         if q + 16 * count > len(chunk):
-            raise ReferenceError_("mesh key list truncated")
+            raise ReferenceParseError("mesh key list truncated")
         for j in range(count):
             type_id, group, instance = struct.unpack_from("<IIQ", chunk, q + 16 * j)
             out.append(ResourceKey(type_id, group, instance))
@@ -144,7 +144,7 @@ def references(key: ResourceKey, data: bytes,
         if key.type == restypes.GEOM:
             return [Reference(k, "tgi") for k in geom_keys(data) if not is_null(k)]
     except struct.error as e:  # a damaged resource; reported, never fatal for the plan
-        raise ReferenceError_(f"damaged {restypes.name(key.type).lower()} ({e})") from None
+        raise ReferenceParseError(f"damaged {restypes.name(key.type).lower()} ({e})") from None
     if key.type in _NO_SCAN_TYPES:
         return []
     candidates = {i for i in package_keys if i >= _MIN_SCAN_INSTANCE}

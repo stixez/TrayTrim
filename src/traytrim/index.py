@@ -18,7 +18,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from traytrim import dbpf, gameindex, modsindex
 from traytrim.dbpf import ResourceKey

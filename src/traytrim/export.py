@@ -23,7 +23,7 @@ import time
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from traytrim import __version__, dbpf, restypes
 from traytrim.dbpf import PackageWriter

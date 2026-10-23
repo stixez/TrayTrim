@@ -8,7 +8,7 @@ from __future__ import annotations
 import threading
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable
+from collections.abc import Callable
 
 from traytrim import tray
 from traytrim.dbpf import ResourceKey
@@ -158,7 +158,7 @@ def export_many(items: list[TrayItem], options: ExportOptions, index: ResourceIn
                     lambda step, d, t, i=position: report(i, step, d, t), cancel)
         except Cancelled:
             break
-        except Exception as e:  # one item's problem is reported, the rest still export
+        except Exception as e:  # noqa: BLE001 - one item's problem is reported, the rest still export
             if cancel is not None and cancel.is_set():
                 break
             outcome.error = describe_error(e)
