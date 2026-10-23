@@ -5,14 +5,15 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "traytrim"
 dynamic = ["version"]
-description = "Export a Sims 4 household with only the custom content its Sims use."
+description = "Export a Sims 4 household, lot or room with only the custom content it uses."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "stixez" }]
 requires-python = ">=3.12"
 dependencies = []
-keywords = ["sims 4", "custom content", "tray", "dbpf", "package"]
+keywords = ["sims 4", "the sims 4", "custom content", "cc", "mods", "tray", "tray importer",
+            "dbpf", "package"]
 classifiers = [
     "Programming Language :: Python :: 3",
     "Operating System :: Microsoft :: Windows",
