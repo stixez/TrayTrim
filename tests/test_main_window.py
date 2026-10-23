@@ -133,6 +133,7 @@ def test_the_window_end_to_end(app, world, monkeypatch, tmp_path):  # noqa: F811
         (tray_dir / f"0x00000000!0x{tb.ROOM_ID:016x}.room").write_bytes(
             tb.room(15, [tb.WALL], tb.objects_message([tb.CHAIR])))
         os.utime(tray_dir, ns=(time.time_ns(), time.time_ns() + 10**9))
+        pump(lambda: not win.index.running)  # the previous step's check is done
         win._last_check = 0
         win._check_for_changes()
         pump(lambda: any(i.kind == "room" for i in win.trays.source.items))
@@ -143,6 +144,7 @@ def test_the_window_end_to_end(app, world, monkeypatch, tmp_path):  # noqa: F811
         later = time.time_ns() + 5 * 10**9
         os.utime(hh_file, ns=(later, later))
         os.utime(tray_dir, ns=(later, later))
+        pump(lambda: not win.index.running)  # the previous step's check is done
         win._last_check = 0
         win._check_for_changes()
         pump(lambda: win._selected is not before and win._selected.instance == before.instance)
@@ -153,6 +155,7 @@ def test_the_window_end_to_end(app, world, monkeypatch, tmp_path):  # noqa: F811
         pump(lambda: win.packages.report is not None
              and win.packages.report.rel == "Meshes/Soft_Bob_Mesh.package")
         (user / "Mods" / "Meshes" / "Soft_Bob_Mesh.package").unlink()
+        pump(lambda: not win.index.running)  # the previous step's check is done
         win._last_check = 0
         win._check_for_changes()
         pump(lambda: "is gone" in win.packages.message_title.text())

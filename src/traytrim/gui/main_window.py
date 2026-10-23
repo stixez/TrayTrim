@@ -1293,19 +1293,21 @@ class MainWindow(QMainWindow):
         Mods tab is for deciding that), or saved something to the Tray in the game. Listing
         the folders takes a moment; only packages that changed are read, and the views are
         only updated if something did."""
-        if (not self._index_ready or self.index.running
-                or time.monotonic() - self._last_check < 5):
+        if not self._index_ready or time.monotonic() - self._last_check < 5:
             return
+        self._last_check = time.monotonic()
+        # The Tray is read again on its own; it doesn't wait for the index.
         stamp = _folder_stamp(self.folders.tray)
         if self._tray_ready and stamp != self._tray_stamp:  # saved in the game meanwhile
             self._tray_stamp = stamp
             self._refresh_tray()
         if self._usage_gen == self._mods_gen and stamp != self._usage_tray_stamp:
-            self._tray_dirty = True  # worked out again once the check below is done
-        self._last_check = time.monotonic()
-        # Mods only: the game install doesn't change while TrayTrim is open (a patch needs the
-        # game closed and is picked up at the next start), and listing it takes longest.
-        self.index.refresh(self.folders.mods, None, quiet=True, game_root=self.folders.game_dir)
+            self._tray_dirty = True  # worked out again once the Mods check is done
+        if not self.index.running:  # one still running finishes the job (and the Tray's)
+            # Mods only: the game install doesn't change while TrayTrim is open (a patch needs
+            # the game closed and is picked up at the next start), and listing it takes longest.
+            self.index.refresh(self.folders.mods, None, quiet=True,
+                               game_root=self.folders.game_dir)
 
     def _show_skipped(self) -> None:
         if self.index.last_result is not None:

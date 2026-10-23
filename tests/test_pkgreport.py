@@ -90,21 +90,27 @@ def test_objects_find_their_mesh_in_another_package_even_when_it_comes_later(tmp
         assert [d.rel for d in dependents(mesh, deps, index)] == ["chair recolor.package"]
 
 
-def test_a_package_that_cant_be_read_is_read_again_next_time(tmp_path, world):  # noqa: F811
+def test_a_package_that_cant_be_read_is_read_again_next_time(tmp_path, world, monkeypatch):  # noqa: F811
+    from traytrim import dbpf
+
     index, k = world
     recolor = tmp_path / "Mods" / "recolor.package"
-    recolor.chmod(0)  # locked by another program, say
-    try:
-        with DependencyIndex(tmp_path / "deps.sqlite") as deps:
-            deps.update(index)
-            assert deps.unreadable == [recolor]
-            assert deps.needing([k["shared_mesh"]]) == []
-            recolor.chmod(0o644)
-            deps.update(index)  # nothing changed on disk, but it wasn't stored as read
-            assert deps.unreadable == []
-            assert [n.by for n in deps.needing([k["shared_mesh"]])] == [k["recolor"]]
-    finally:
-        recolor.chmod(0o644)
+    real_package = dbpf.Package
+
+    def locked(path):  # locked by another program, say (chmod can't do that on Windows)
+        if os.fspath(path) == os.fspath(recolor):
+            raise PermissionError(13, "The process cannot access the file")
+        return real_package(path)
+
+    with DependencyIndex(tmp_path / "deps.sqlite") as deps:
+        monkeypatch.setattr(dbpf, "Package", locked)
+        deps.update(index)
+        assert deps.unreadable == [recolor]
+        assert deps.needing([k["shared_mesh"]]) == []
+        monkeypatch.setattr(dbpf, "Package", real_package)
+        deps.update(index)  # nothing changed on disk, but it wasn't stored as read
+        assert deps.unreadable == []
+        assert [n.by for n in deps.needing([k["shared_mesh"]])] == [k["recolor"]]
 
 
 def test_a_texture_referenced_in_another_format_is_still_needed(tmp_path):
