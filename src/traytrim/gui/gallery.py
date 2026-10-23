@@ -235,5 +235,35 @@ class TrayList(QListView):
         finally:
             self._filtering = False
 
+    def replace_items(self, items: list[TrayItem]) -> bool:
+        """The Tray read again: new items, the chosen one kept chosen if it's still there (by
+        its instance; the objects are new). Returns whether it is."""
+        chosen = self._chosen.instance if self._chosen is not None else None
+        self._filtering = True
+        try:
+            self.source.set_items(items)
+            self._chosen = next((i for i in items if i.instance == chosen), None)
+            self.selectionModel().clearSelection()
+            self.setCurrentIndex(QModelIndex())
+            if self._chosen is not None:
+                for row in range(self.proxy.rowCount()):
+                    index = self.proxy.index(row, 0)
+                    if index.data(ItemRole) is self._chosen:
+                        self.setCurrentIndex(index)
+                        break
+        finally:
+            self._filtering = False
+        return chosen is None or self._chosen is not None
+
+    def select_item(self, item: TrayItem) -> bool:
+        """Choose a tray item shown in the list (the caller sets the right kind first)."""
+        for row in range(self.proxy.rowCount()):
+            index = self.proxy.index(row, 0)
+            if index.data(ItemRole).instance == item.instance:
+                self.setCurrentIndex(index)
+                self.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
+                return True
+        return False
+
     def visible_count(self) -> int:
         return self.proxy.rowCount()

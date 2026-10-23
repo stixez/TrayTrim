@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QBuffer, QByteArray, QIODevice, Qt
+from PySide6.QtGui import QImage, QImageReader
 
 from traytrim import dbpf, tray
 from traytrim.index import ResourceIndex
@@ -17,8 +17,22 @@ from traytrim.index import ResourceIndex
 SIM_PORTRAIT = 0x56278554
 
 
+# Larger than any thumbnail or tray picture (those are a few hundred pixels across). The images
+# come from CC packages: one whose header claims tens of thousands of pixels each way would be
+# decoded at full size before scaling.
+MAX_PIXELS = 4096 * 4096
+
+
 def _decode(data: bytes, size: int) -> QImage | None:
-    image = QImage.fromData(data)
+    # The buffer must outlive the reader: a temporary one would be freed while it's read.
+    buffer = QBuffer()
+    buffer.setData(QByteArray(data))
+    buffer.open(QIODevice.OpenModeFlag.ReadOnly)
+    reader = QImageReader(buffer)
+    stated = reader.size()  # from the header, before anything is decoded
+    if not stated.isValid() or stated.width() * stated.height() > MAX_PIXELS:
+        return None
+    image = reader.read()
     if image.isNull():
         return None
     return image.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,

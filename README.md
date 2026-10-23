@@ -10,6 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://buymeacoffee.com/stixe"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/household-light.png" width="860" alt="TrayTrim showing a household, its export size and its CC">
 </p>
 
@@ -50,8 +54,15 @@ packages they live in, writes them into one package next to the tray files, and 
 - **Prepares an in-game test**: a folder with only the export and steps to try it in your game
   with nothing else installed, then put your Mods back.
 - **Exports several at once**, one verified zip each, or together in one zip that shares one
-  package, like a lot with the household that lives there. A history keeps every export, and any
-  earlier zip can be checked again later without the Mods folder it came from.
+  package, like a lot with the household that lives there. A history keeps every export.
+- **Exports one item on its own**: right-click any CC item for a small package with just that
+  item and everything it needs, even when it lives in a 1 GB merge.
+- **Shows what breaks if you delete a package** (the Mods tab): which other CC needs its meshes
+  or textures, directly or through another package, which households, lots and rooms use it, and
+  which of its files never load because a later package replaces them.
+- **Checks a zip before you install it**: open or drop any zip with tray files and packages (a
+  TrayTrim export or not) to see whether it's intact, which packs it needs that you don't have,
+  and which of its CC you already have, and whose copy the game would use.
 
 <table>
   <tr>
@@ -93,10 +104,11 @@ started on each release by CI, but haven't been tried with the game yet. Reports
 
 ## Safety
 
-TrayTrim only **reads** your Sims 4 folders. It never writes, moves, renames or deletes anything in
-Mods or Tray, your saves, the game install, or Sims 4 Studio's folder, and it refuses to save an
-export inside any of them. Exports go to a folder you choose (your Desktop by default); TrayTrim's
-own index and settings live in its cache and config folders.
+TrayTrim only **reads** your Sims 4 folders, the Mods tab and Check a zip included. It never
+writes, moves, renames or deletes anything in Mods or Tray, your saves, the game install, or
+Sims 4 Studio's folder, and it refuses to save an export inside any of them. Exports go to a
+folder you choose (your Desktop by default); TrayTrim's own index and settings live in its cache
+and config folders.
 
 The optional in-game test kit is the one thing that touches Mods, and only when you run it
 yourself: its steps (or the two `.bat` helpers on Windows) rename your Mods folder for the test and
@@ -124,6 +136,12 @@ for the ids of resources in their own package; object definitions and models are
 against models and textures in other packages, so a recolor finds its mesh. Textures are matched
 across texture formats, the way the game resolves them.
 
+**What needs what** (the Mods tab) is a second cache next to the index: every reference between
+Mods resources, found the way an export follows them. The first build reads every CAS part, mesh
+and object in Mods, so it takes a while on a big folder; after that only changed packages are
+read. Only the copies the game loads count, and references are followed through any number of
+packages, both for "what breaks" and for "used by".
+
 **One assumption the game doesn't document:** when two Mods packages hold the same resource, the
 game uses the one that loads last, and packages load in alphabetical order of their path in Mods.
 Conflict notices say so.
@@ -135,6 +153,8 @@ Conflict notices say so.
   recipient needs those separately.
 - Sims living on a lot aren't part of a lot export; export the lot and their household together.
 - CC names (string tables) aren't exported; CAS shows the items without them.
+- The Mods tab checks the Tray only: Sims, lots and rooms that exist only in a save game aren't
+  counted in "used by".
 - Many CC creators don't allow re-uploading their work. Exports are meant for your own backups and
   transfers, or for CC you have the rights to share.
 
@@ -182,6 +202,11 @@ Bug reports and pull requests are welcome. Three rules keep TrayTrim trustworthy
   Windows, macOS and Linux in CI.
 
 CI also runs `ruff check src tests` (the rules are in `pyproject.toml`).
+
+## Support
+
+TrayTrim is free and open source. If it saves you time, you can
+[buy me a coffee](https://buymeacoffee.com/stixe).
 
 ## License and credits
 

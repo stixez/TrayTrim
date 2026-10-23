@@ -16,6 +16,9 @@ from traytrim.errors import describe_error  # noqa: F401  (re-exported for the G
 # widget being alive (closing the window mid-task must not delete what the worker reports to).
 _live: set[BackgroundTask] = set()
 _live_lock = threading.Lock()
+# False once shutdown() runs: a task started after that (say by a signal handler run while the
+# app tears down, reacting to a task that was just cancelled) would run unwaited into exit.
+_accepting = True
 
 
 class BackgroundTask(QObject):
@@ -60,10 +63,12 @@ class BackgroundTask(QObject):
             _emit(self.progress, args)
 
     def start(self) -> None:
+        with _live_lock:
+            if not _accepting:
+                return  # the app is quitting: never starts, never reports
+            _live.add(self)
         self.running = True
         self._done.connect(self._release)
-        with _live_lock:
-            _live.add(self)
         QThreadPool.globalInstance().start(_Job(self))
 
     def _release(self) -> None:
@@ -75,8 +80,11 @@ class BackgroundTask(QObject):
 def shutdown(timeout_ms: int = 15_000) -> bool:
     """Before the app exits: ask every running task to stop and wait for the worker threads,
     so none is still running Python or sending signals while Qt and Python shut down (that
-    crashes the process on exit). True if they all finished in time."""
+    crashes the process on exit). No task starts after this. True if they all finished in
+    time."""
+    global _accepting
     with _live_lock:
+        _accepting = False
         tasks = list(_live)
     for task in tasks:
         task.cancel()

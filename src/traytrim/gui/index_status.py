@@ -84,17 +84,34 @@ class IndexController(QObject):
         self.last_result: UpdateResult | None = None
         self._task: BackgroundTask | None = None
         self._pending: tuple[Path | None, Path | None] | None = None
+        self._game_root: Path | None = None
+        self._game_skipped = False
 
-    def refresh(self, mods: Path | None, game: Path | None) -> None:
+    def refresh(self, mods: Path | None, game: Path | None, quiet: bool = False,
+                game_root: Path | None = None) -> None:
+        """Update the index. quiet: a check for changes (coming back to the window), which
+        only shows progress if packages need reading, and never restarts a running update.
+        game_root: the game folder when `game` is None for a Mods-only check, so the game's
+        skipped packages stay reported."""
+        if game is not None or game_root is not None:
+            self._game_root = game if game is not None else game_root
         if self._task is not None and self._task.running:
+            if quiet:
+                return
             self._pending = (mods, game)
             self._task.cancel()
             return
-        self._start(mods, game)
+        self._start(mods, game, quiet)
 
-    def _start(self, mods: Path | None, game: Path | None) -> None:
+    @property
+    def running(self) -> bool:
+        return self._task is not None and self._task.running
+
+    def _start(self, mods: Path | None, game: Path | None, quiet: bool = False) -> None:
+        self._game_skipped = game is None  # a check of Mods alone: the game part is as it was
         def work(task: BackgroundTask) -> UpdateResult:
-            task.report("listing", force=True)
+            if not quiet:
+                task.report("listing", force=True)
             with ResourceIndex() as ix:
                 return ix.update(mods, game,
                                  lambda phase, done, total: task.report(
@@ -118,6 +135,11 @@ class IndexController(QObject):
     def _on_finished(self, result: UpdateResult) -> None:
         if self._run_pending():
             return
+        if self._game_skipped and self.last_result is not None:
+            # Mods were checked alone: game packages that couldn't be read still can't.
+            game = [f for f in self.last_result.failed if f not in result.failed
+                    and self._game_root is not None and Path(f[0]).is_relative_to(self._game_root)]
+            result.failed = game + result.failed
         self.last_result = result
         self.status.show_result(result)
         self.result_ready.emit(result)

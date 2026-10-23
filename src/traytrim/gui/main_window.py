@@ -1,10 +1,11 @@
-"""The single main window: tray gallery on the left, the selected household, lot or room on the
-right."""
+"""The single main window: the Tray gallery or the Mods packages on the left; on the right the
+selected household, lot, room or package, or a zip being checked."""
 
 from __future__ import annotations
 
 import threading
-from pathlib import Path
+import time
+from pathlib import Path, PurePosixPath
 from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
@@ -17,13 +18,13 @@ from traytrim import paths, tray
 from traytrim.gui.gallery import PORTRAIT, TrayList
 from traytrim.gui.describe import THUMB_TYPES
 from traytrim.gui.household_view import HouseholdReport, HouseholdView
-from traytrim.gui.report_parts import THUMB
+from traytrim.gui.report_parts import MAX_CARDS, THUMB
 from traytrim.gui.images import load_portraits, load_thumbnails, load_tray_pictures
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
 from traytrim.gui import icons, theme
 from traytrim.gui.tasks import BackgroundTask, describe_error, run_in_background
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import ElidedLabel, label, link_button
+from traytrim.gui.widgets import DropOverlay, ElidedLabel, label, link_button
 from traytrim.index import ResourceIndex
 from traytrim.export import default_base_name
 from traytrim.gui.export_dialog import ExportDialog, ExportRequest
@@ -34,16 +35,38 @@ from traytrim.batch import locate_item, pick_sims, plan_refs, scoped_refs
 from traytrim.names import item_names
 from traytrim.resolve import Where
 from traytrim.settings import Settings
+from traytrim.gui.mods_list import ModsList, PackageRole
+from traytrim.gui.package_view import PackageView
+from traytrim.gui.received_view import ReceivedView
+from traytrim.gui.describe import display_name
+from traytrim.depindex import DependencyIndex
+from traytrim.export import safe_name
+from traytrim.pkgreport import (ITEM_TYPES, TrayUsage, dependents, package_report, scan_usage,
+                                texture_needs, users)
+from traytrim.plan import build_plan
+from traytrim.received import Received, check_received
 
 SIDEBAR_WIDTH = 320
 # Tray pictures: small in the gallery (a square crop of a 3:2 picture fills the tile at 2x),
 # the game's full 300 px for the selected item's header.
 GALLERY_PICTURE_WIDTH = PORTRAIT * 3
 PICTURE_WIDTH = 300
-# The gallery shows one kind at a time: (setting value, tray item type, tab label, plural noun).
+# The sidebar shows one kind at a time: (setting value, tray item type, tab label, plural noun).
+# "mods" isn't a tray item: it lists the Mods packages instead (tray item type None).
 KINDS = [("household", tray.ITEM_HOUSEHOLD, "Households", "households"),
          ("lot", tray.ITEM_LOT, "Lots", "lots"),
-         ("room", tray.ITEM_ROOM, "Rooms", "rooms")]
+         ("room", tray.ITEM_ROOM, "Rooms", "rooms"),
+         ("mods", None, "Mods", "packages")]
+MODS = KINDS[3]
+
+
+def _folder_stamp(folder: Path | None) -> int | None:
+    """A folder's modification time: it changes when files are added, removed or replaced in
+    it (the game saves tray items as new files)."""
+    try:
+        return folder.stat().st_mtime_ns if folder is not None else None
+    except OSError:
+        return None
 
 
 class FolderStatus(QWidget):
@@ -86,6 +109,11 @@ class MainWindow(QMainWindow):
         self._analysis_gen = 0
         self._done_gen = -1  # the last analysis generation that produced a report or an error
         self._index_ready = False
+        self._tray_ready = False  # the Tray folder is read (the gallery can be searched)
+        self._tray_state = ("", "")
+        self._tray_stamp = None  # the Tray folder's modification time when it was read
+        self._tray_dirty = False  # the Tray changed; what uses what waits for the Mods check
+        self._last_check = 0.0   # when the folders were last checked for changes
         self._full_report: HouseholdReport | None = None  # all Sims, before the Sim filter
         self._selected: tray.TrayItem | None = None
         # tray item -> the user's Sims, left-out items and chosen copies (see batch.Choice)
@@ -93,11 +121,31 @@ class MainWindow(QMainWindow):
         self._names_read: set = set()  # TrayRefs whose packages were read (name found or not)
         self._names_cancel: threading.Event | None = None
         self._kind = next((k for k in KINDS if k[0] == settings.tray_kind), KINDS[0])
+        self._last_tray_kind = self._kind if self._kind is not MODS else KINDS[0]
         self._plan_task: BackgroundTask | None = None
         self._plan_gen = 0
         self._plan_timer = QTimer(self, singleShot=True, interval=300)
         self._plan_timer.timeout.connect(self._start_plan)
+        # The Mods tab: its package list, and what needs what (references and Tray usage),
+        # worked out in the background the first time the tab is opened.
+        self._mods_gen = 0           # bumped when the index or the Tray changes
+        self._mods_listed = -1       # the generation the list was loaded for
+        self._usage: TrayUsage | None = None
+        self._usage_error = ""
+        self._unreadable: list = []  # packages the dependency index couldn't read
+        self._usage_gen = -1         # the generation _usage was worked out for
+        self._usage_tray_stamp = None  # the Tray folder's modification time it was read at
+        self._usage_task: BackgroundTask | None = None
+        self._package = None         # ModsPackageInfo shown on the right
+        self._package_gen = 0
+        self._package_loading = -1   # the generation still being read, if any
+        # Check a zip
+        self._received: Received | None = None
+        self._received_task: BackgroundTask | None = None
+        self._pending_zip: Path | None = None
+        self._item_planning = False  # an "export this item alone" is being worked out
         self.setWindowTitle("TrayTrim")
+        self.setAcceptDrops(True)
         self.setMinimumSize(960, 600)
 
         root = QWidget()
@@ -113,17 +161,36 @@ class MainWindow(QMainWindow):
         self.household.exclusion_changed.connect(self._exclusion_changed)
         self.household.copies_chosen.connect(self._copies_chosen)
         self.household.export_requested.connect(self._export)
-        row.addWidget(self.household, 1)
+        self.household.export_item_requested.connect(
+            lambda ref, name: self._export_item(ref, name, self._household_copies()))
+        self.household.thumbnails_wanted.connect(self._household_thumbnails)
+        self.packages = PackageView()
+        self.packages.export_item_requested.connect(self._export_item)
+        self.packages.package_requested.connect(self._show_package_path)
+        self.packages.tray_item_requested.connect(self._show_tray_item)
+        self.received = ReceivedView()
+        self.received.closed.connect(self._close_received)
+        self.right = QStackedWidget()
+        for view in (self.household, self.packages, self.received):
+            self.right.addWidget(view)
+        self.right.setCurrentWidget(self.packages if self._kind is MODS else self.household)
+        row.addWidget(self.right, 1)
         self.setCentralWidget(root)
+        self._drop_overlay = DropOverlay("Drop to check this zip",
+                                         "See if it works in your game. Nothing is installed or "
+                                         "changed.", root)
 
         self._build_status_bar()
         self.index = IndexController(self.index_status, self)
         self.index.result_ready.connect(self._index_finished)
         self.index.stopped.connect(self._check_index_ready)
+        self.index.stopped.connect(self._refresh_stopped)
         QShortcut(QKeySequence.StandardKey.Find, self, activated=self._focus_search)
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, activated=self._export_several)
         QShortcut(QKeySequence("Ctrl+H"), self, activated=self._show_history)
+        QShortcut(QKeySequence.StandardKey.Open, self, activated=self._choose_zip)
+        QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._leave_received)
         self._show_folders()
         self._restore_geometry()
         # Start with no control focused, so no focus ring shows until the keyboard is used.
@@ -144,7 +211,7 @@ class MainWindow(QMainWindow):
         head = QVBoxLayout()
         head.setContentsMargins(SPACE["l"], 0, SPACE["l"], 0)
         head.setSpacing(SPACE["m"])
-        head.addWidget(label("Tray", "title"))
+        head.addWidget(self._section_tabs())
         self.search = QLineEdit()
         self.search.setEnabled(False)
         self.search.textChanged.connect(self._search_changed)
@@ -155,13 +222,19 @@ class MainWindow(QMainWindow):
         self._clear_action.setVisible(False)
         self._apply_icons()
         head.addWidget(self.search)
-        head.addWidget(self._kind_tabs())
+        self.kind_tabs = self._kind_tabs()
+        self.kind_tabs.setVisible(self._kind is not MODS)
+        head.addWidget(self.kind_tabs)
+        self.mods_sort = self._mods_sort_tabs()
+        self.mods_sort.setVisible(self._kind is MODS)
+        head.addWidget(self.mods_sort)
         col.addLayout(head)
         self._update_search_hint()
 
         self.sidebar_stack = QStackedWidget()
         self.trays = TrayList()
         self.trays.item_selected.connect(self._item_selected)
+        self.trays.clicked.connect(self._leave_received)
         state = QWidget()
         state_col = QVBoxLayout(state)
         state_col.setContentsMargins(SPACE["l"], SPACE["s"], SPACE["l"], 0)
@@ -171,8 +244,14 @@ class MainWindow(QMainWindow):
         state_col.addWidget(self.tray_state_title)
         state_col.addWidget(self.tray_state_body)
         state_col.addStretch(1)
+        self.mods_list = ModsList()
+        self.mods_list.set_by_size(self.settings.mods_sort == "size")
+        self.mods_list.package_selected.connect(self._package_chosen)
+        # Clicking the item that's already chosen also leaves a zip being checked.
+        self.mods_list.clicked.connect(self._mods_clicked)
         self.sidebar_stack.addWidget(self.trays)
         self.sidebar_stack.addWidget(state)
+        self.sidebar_stack.addWidget(self.mods_list)
         self._state_page = state
         col.addWidget(self.sidebar_stack, 1)
 
@@ -186,14 +265,74 @@ class MainWindow(QMainWindow):
                                      "(Ctrl+Shift+E)")
         self.batch_button.clicked.connect(self._export_several)
         self.batch_button.setEnabled(False)
+        check = link_button("Check a zip")
+        check.setToolTip("Open a zip someone sent you and see if it works in your game, "
+                         "before installing it (Ctrl+O). You can also drop a zip on the window.")
+        check.clicked.connect(self._choose_zip)
         history = link_button("Export history")
         history.setToolTip("Earlier exports, and checking them again (Ctrl+H)")
         history.clicked.connect(self._show_history)
         foot.addWidget(self.batch_button)
         foot.addStretch(1)
+        foot.addWidget(check)
+        foot.addStretch(1)
         foot.addWidget(history)
         col.addLayout(foot)
         return side
+
+    def _section_tabs(self) -> QWidget:
+        """"Tray" and "Mods" as the sidebar's heading: what the list below shows."""
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE["l"])
+        group = QButtonGroup(box)
+        self._section_buttons: dict[str, QPushButton] = {}
+        for name, tip in (("Tray", "Your saved households, lots and rooms"),
+                          ("Mods", "Your Mods packages: what's in each, and what needs it")):
+            b = QPushButton(name)
+            b.setCheckable(True)
+            b.setChecked((name == "Mods") == (self._kind is MODS))
+            b.setProperty("kind", "titleTab")
+            b.setCursor(Qt.CursorShape.PointingHandCursor)
+            b.setToolTip(tip)
+            b.setAccessibleName(f"Show {name}")
+            b.clicked.connect(lambda _c=False, n=name: self._set_section(n))
+            group.addButton(b)
+            row.addWidget(b)
+            self._section_buttons[name] = b
+        row.addStretch(1)
+        return box
+
+    def _set_section(self, name: str) -> None:
+        if name == "Mods":
+            self._set_kind(MODS)
+        elif self._kind is MODS:
+            self._set_kind(self._last_tray_kind)
+
+    def _mods_sort_tabs(self) -> QWidget:
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(0)
+        group = QButtonGroup(box)
+        by_size_now = self.settings.mods_sort == "size"
+        for i, (text, by_size) in enumerate((("A to Z", False), ("Largest first", True))):
+            b = QPushButton(text)
+            b.setCheckable(True)
+            b.setChecked(by_size == by_size_now)
+            b.setProperty("kind", "segment")
+            b.setProperty("position", "first" if i == 0 else "last")
+            b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+            b.setAccessibleName(f"Sort packages: {text.lower()}")
+            b.clicked.connect(lambda _c=False, s=by_size: self._set_mods_sort(s))
+            group.addButton(b)
+            row.addWidget(b)
+        return box
+
+    def _set_mods_sort(self, by_size: bool) -> None:
+        self.mods_list.set_by_size(by_size)
+        self.settings.mods_sort = "size" if by_size else "name"  # saved with the window
 
     def _kind_tabs(self) -> QWidget:
         box = QWidget()
@@ -202,13 +341,14 @@ class MainWindow(QMainWindow):
         row.setSpacing(0)
         group = QButtonGroup(box)
         self._kind_buttons: dict[str, QPushButton] = {}
-        for i, kind in enumerate(KINDS):
+        tray_kinds = [k for k in KINDS if k is not MODS]
+        for i, kind in enumerate(tray_kinds):
             b = QPushButton(kind[2])
             b.setCheckable(True)
             b.setChecked(kind is self._kind)
             b.setProperty("kind", "segment")
             b.setProperty("position", "first" if i == 0 else
-                          "last" if i == len(KINDS) - 1 else "middle")
+                          "last" if i == len(tray_kinds) - 1 else "middle")
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             b.setAccessibleName(f"Show {kind[3]}")
             b.clicked.connect(lambda _c=False, k=kind: self._set_kind(k))
@@ -220,11 +360,26 @@ class MainWindow(QMainWindow):
     def _set_kind(self, kind) -> None:
         if kind is self._kind:
             return
+        if self._kind is not MODS:
+            self._last_tray_kind = self._kind
         self._kind = kind
-        self._kind_buttons[kind[0]].setChecked(True)
+        if kind is not MODS:
+            self._kind_buttons[kind[0]].setChecked(True)
+        self._section_buttons["Mods" if kind is MODS else "Tray"].setChecked(True)
+        self.kind_tabs.setVisible(kind is not MODS)
+        self.mods_sort.setVisible(kind is MODS)
         self.settings.tray_kind = kind[0]
         self._update_search_hint()
+        self._show_right()
+        if kind is MODS:
+            self._enter_mods()
         self._search_changed(self.search.text())
+
+    def _show_right(self) -> None:
+        """The view for the sidebar's kind; a zip being checked stays until it's closed."""
+        if self.right.currentWidget() is self.received:
+            return
+        self.right.setCurrentWidget(self.packages if self._kind is MODS else self.household)
 
     def _update_search_hint(self) -> None:
         hint = ("Search households and Sims" if self._kind[1] == tray.ITEM_HOUSEHOLD
@@ -251,7 +406,9 @@ class MainWindow(QMainWindow):
         self._tray_gen += 1
         gen = self._tray_gen
         self.trays.source.set_items([])
-        self.search.setEnabled(False)
+        self._tray_ready = False
+        self._mods_gen += 1  # Tray usage is worked out again
+        self._update_search_enabled()
         self._select(None)
         tray_dir = self.folders.tray
         if tray_dir is None or not tray_dir.is_dir():
@@ -271,19 +428,24 @@ class MainWindow(QMainWindow):
         items, failed = result
         shown = {k[1] for k in KINDS}
         self.trays.source.set_items([i for i in items if i.type in shown])
-        households = [i for i in items if i.type == tray.ITEM_HOUSEHOLD]
         if failed:
             self.statusBar().showMessage(
                 f"{len(failed)} tray items couldn't be read and are left out.", 10_000)
-        self.search.setEnabled(True)
+        self._tray_ready = True
+        self._tray_stamp = _folder_stamp(self.folders.tray)
+        self._update_search_enabled()
         self._search_changed(self.search.text())
-        shown = list(self.trays.source.items)
-        run_in_background(lambda: load_tray_pictures(shown, GALLERY_PICTURE_WIDTH),
+        self._load_gallery_images(gen, list(self.trays.source.items))
+
+    def _load_gallery_images(self, gen: int, items: list) -> None:
+        """Tray pictures and Sim portraits for gallery rows, off the UI thread."""
+        run_in_background(lambda: load_tray_pictures(items, GALLERY_PICTURE_WIDTH),
                           lambda pictures: self._on_pictures(gen, pictures),
                           lambda _e: None)  # pictures are a nicety; icons stay
         user_dir = self.folders.user_dir
+        households = [i for i in items if i.type == tray.ITEM_HOUSEHOLD]
         sim_ids = {s.sim_id for i in households for s in i.sims}
-        if user_dir is not None:
+        if user_dir is not None and sim_ids:
             run_in_background(lambda: load_portraits(user_dir, sim_ids, PORTRAIT * 2),
                               lambda images: self._on_portraits(gen, images),
                               lambda _e: None)  # portraits are a nicety; initials stay
@@ -303,7 +465,17 @@ class MainWindow(QMainWindow):
                              f"{tray_dir}: {describe_error(error)}. If the game is running, close "
                              "it and reopen TrayTrim.")
 
+    def _update_search_enabled(self) -> None:
+        self.search.setEnabled(self._mods_listed == self._mods_gen if self._kind is MODS
+                               else self._tray_ready)
+
     def _set_tray_state(self, title: str, body: str) -> None:
+        """The Tray folder's state in place of the gallery (shown when a Tray tab is open)."""
+        self._tray_state = (title, body)
+        if self._kind is not MODS:
+            self._show_state(title, body)
+
+    def _show_state(self, title: str, body: str) -> None:
         self.tray_state_title.setText(title)
         self.tray_state_body.setText(body)
         self.tray_state_body.setVisible(bool(body))
@@ -315,28 +487,38 @@ class MainWindow(QMainWindow):
         self._clear_action.setIcon(icons.icon("clear", p.text_secondary, 16))
 
     def changeEvent(self, event) -> None:  # noqa: N802
+        if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
+            self._check_for_changes()
         if event.type() == QEvent.Type.PaletteChange:  # the theme changed
             self._apply_icons()
             self.household.refresh_theme()
+            self.packages.refresh_theme()
+            self.received.refresh_theme()
+            self.mods_list.viewport().update()
             self.trays.viewport().update()
         super().changeEvent(event)
 
     def _search_changed(self, text: str) -> None:
         self._clear_action.setVisible(bool(text))
+        self._update_search_enabled()
+        if self._kind is MODS:
+            self._mods_search_changed(text)
+            return
         self.trays.set_filter(text, self._kind[1])
         self._update_batch_button()
-        if not self.search.isEnabled():
-            return  # the Tray folder isn't read yet, or couldn't be; its state stays shown
+        if not self._tray_ready:  # the Tray folder isn't read yet, or couldn't be
+            self._show_state(*self._tray_state)
+            return
         noun = self._kind[3]
         if self.trays.visible_count():
             self.sidebar_stack.setCurrentWidget(self.trays)
         elif not any(i.type == self._kind[1] for i in self.trays.source.items):
-            self._set_tray_state(f"No {noun} in your Tray folder",
+            self._show_state(f"No {noun} in your Tray folder",
                                  f"Save {'a household' if noun == 'households' else 'one'} to "
                                  "the library in the game, and it shows up here next time you "
                                  "open TrayTrim.")
         else:
-            self._set_tray_state(
+            self._show_state(
                 f"Nothing matches \u201c{text.strip()}\u201d",
                 "Search looks at household names and the names of their Sims."
                 if noun == "households" else f"Search looks at the names of your {noun}.")
@@ -349,6 +531,8 @@ class MainWindow(QMainWindow):
     # Household analysis
 
     def _item_selected(self, item: tray.TrayItem | None) -> None:
+        if item is not None and self.right.currentWidget() is self.received:
+            self._close_received()  # picking something on the left means looking at it
         self._select(item)
 
     def _select(self, item: tray.TrayItem | None) -> None:
@@ -406,28 +590,39 @@ class MainWindow(QMainWindow):
         self._show_report(report)
         self._load_names(report)
         self._load_picture(report.item)
-        known = self.household.thumbnails()
+
+    def _household_thumbnails(self, instance: int, refs: list) -> None:
+        """The household view shows cards that have no thumbnail yet (a page at a time)."""
+        tried = {r.ref.instance for r in refs}
+        self._load_thumbnails(refs, lambda images: self.household.set_thumbnails(
+            instance, images, tried))
+
+    def _load_thumbnails(self, refs, sink, index_path: Path | None = None, on_end=None) -> None:
+        """Thumbnails of CC items, read off the UI thread, then sink({instance: image}). The
+        sink is always called once, with nothing if there's nothing to show; on_end after it.
+        index_path: a received zip's own index instead of the user's."""
         wanted: dict[int, set[int]] = {}  # thumbnail type -> instances
-        for r in report.refs:
+        for r in refs:
             thumb_type = THUMB_TYPES.get(r.ref.kind)
-            if r.where is Where.CC and thumb_type and r.ref.instance not in known:
+            if thumb_type:
                 wanted.setdefault(thumb_type, set()).add(r.ref.instance)
-        instance = report.item.instance
-        if not wanted:
-            self.household.set_thumbnails(instance, {}, True)
-            return
         user_dir = self.folders.user_dir
 
         def work():
             images = {}
-            with ResourceIndex() as ix:
-                for thumb_type, instances in wanted.items():
-                    images.update(load_thumbnails(ix, sorted(instances), thumb_type,
-                                                  THUMB * 2, user_dir))
+            if wanted:
+                with ResourceIndex(index_path) as ix:
+                    for thumb_type, instances in wanted.items():
+                        images.update(load_thumbnails(ix, sorted(instances), thumb_type,
+                                                      THUMB * 2, user_dir))
             return images
 
-        run_in_background(work, lambda images: self.household.set_thumbnails(instance, images),
-                          lambda _e: self.household.set_thumbnails(instance, {}))
+        def finish(images) -> None:
+            sink(images)
+            if on_end is not None:
+                on_end()
+
+        run_in_background(work, finish, lambda _e: finish({}))
 
     def _load_picture(self, item: tray.TrayItem) -> None:
         if self.household.has_picture(item.instance):
@@ -531,6 +726,8 @@ class MainWindow(QMainWindow):
         task.start()
 
     def _export(self) -> None:
+        if self.right.currentWidget() is not self.household:
+            return  # Ctrl+E exports the household on screen, not one hidden behind a tab
         state = self.household.export_state()
         if state is None:
             return
@@ -560,7 +757,7 @@ class MainWindow(QMainWindow):
                                      self.folders.game_dir, selected, self))
 
     def _show_history(self) -> None:
-        self._run_dialog(HistoryDialog(self))
+        self._run_dialog(HistoryDialog(self._open_zip, self))
 
     @staticmethod
     def _run_dialog(dialog) -> None:
@@ -578,7 +775,12 @@ class MainWindow(QMainWindow):
             self.household.show_message(f"Couldn't read {item.name or 'this ' + item.kind}",
                                         describe_error(error))
 
-    def _index_finished(self, _result) -> None:
+    def _index_finished(self, result) -> None:
+        tray_changed, self._tray_dirty = self._tray_dirty, False
+        if self._index_ready and not result.changed:
+            if tray_changed:  # only the Tray: what uses what is worked out again
+                self._index_changed()
+            return  # otherwise everything on screen is still right
         self._index_ready = True
         # Packages may have changed: names are read again as items are shown.
         self._names_read.clear()
@@ -586,6 +788,13 @@ class MainWindow(QMainWindow):
         self._update_batch_button()
         self._analysis_gen += 1
         self._analyse()
+        self._index_changed()
+
+    def _refresh_stopped(self) -> None:
+        """A check for changes didn't finish: a Tray change it was waiting for still counts."""
+        if self._tray_dirty and self._index_ready:
+            self._tray_dirty = False
+            self._index_changed()
 
     def _check_index_ready(self) -> None:
         """Use the cached index right away if it's complete for these folders, even when the
@@ -605,8 +814,441 @@ class MainWindow(QMainWindow):
                 self._update_batch_button()
                 self._analysis_gen += 1
                 self._analyse()
+                self._index_changed()
+            elif self._pending_zip is not None and not self.index.running:
+                # The index couldn't be built: check the zip with what there is rather than
+                # wait for it forever (it's still checked file by file).
+                path, self._pending_zip = self._pending_zip, None
+                self._open_zip(path)
 
         run_in_background(work, done, lambda _e: None)
+
+    # Mods tab
+
+    def _index_changed(self) -> None:
+        """The index is ready or was refreshed: the Mods tab's list and what needs what are
+        worked out again (when the tab is open), and a zip waiting for the index is checked."""
+        self._mods_gen += 1
+        if self._usage_task is not None and self._usage_task.running:
+            self._usage_task.cancel()  # for the old state; it starts over once it stops
+        if self._kind is MODS:
+            self._enter_mods()
+        if self._pending_zip is not None:
+            path, self._pending_zip = self._pending_zip, None
+            self._open_zip(path)
+
+    def _enter_mods(self) -> None:
+        if not self._index_ready:
+            self._mods_search_changed(self.search.text())
+            return
+        if self._mods_listed != self._mods_gen:
+            self._load_mods_list()
+        self._start_usage()
+
+    def _load_mods_list(self) -> None:
+        gen = self._mods_gen
+
+        def work():
+            with ResourceIndex() as ix:
+                return ix.mods_packages(ITEM_TYPES)
+
+        def done(packages) -> None:
+            if gen != self._mods_gen:
+                return
+            self._mods_listed = gen
+            self.mods_list.set_packages(packages)
+            if self._kind is MODS:
+                self._search_changed(self.search.text())
+            if self._package is not None:  # it may have changed: read it again
+                current = next((p for p in packages if p.path == self._package.path), None)
+                if current is None:  # deleted (likely just now, after looking at it here)
+                    gone = PurePosixPath(self._package.rel).stem
+                    self._package = None
+                    self.mods_list.forget_choice()  # if it comes back, it isn't chosen silently
+                    self._package_gen += 1
+                    self.packages.report = None
+                    self.packages.show_message(f"{gone} is gone",
+                                               "It isn't in your Mods folder any more.")
+                else:
+                    self._package_selected(current)
+
+        self._mods_search_changed(self.search.text())
+        run_in_background(work, done, lambda e: self._mods_list_failed(gen, e))
+
+    def _mods_list_failed(self, gen: int, error: Exception) -> None:
+        if gen == self._mods_gen and self._kind is MODS:
+            self._show_state("Couldn't list your Mods folder", describe_error(error))
+
+    def _mods_search_changed(self, text: str) -> None:
+        self.mods_list.set_filter(text)
+        mods = self.folders.mods
+        if mods is None or not mods.is_dir():
+            self._show_state("Mods folder not found",
+                             "Choose your Sims 4 folder in the bar at the bottom. It's the folder "
+                             "that holds Mods and Tray, usually Documents/Electronic Arts/The "
+                             "Sims 4.")
+        elif not self._index_ready:
+            self._show_state("Waiting for the index",
+                             "TrayTrim is reading your Mods folder and the game. The packages "
+                             "show up here when it's done.")
+        elif self._mods_listed != self._mods_gen and not self.mods_list.source.packages:
+            self._show_state("Reading your Mods folder", "")
+        elif not self.mods_list.source.packages:
+            self._show_state("No packages in your Mods folder",
+                             "Packages the game loads from Mods show up here.")
+        elif self.mods_list.visible_count():
+            self.sidebar_stack.setCurrentWidget(self.mods_list)
+        else:
+            self._show_state(f"Nothing matches \u201c{text.strip()}\u201d",
+                             "Search looks at package names and their folders in Mods.")
+
+    def _start_usage(self) -> None:
+        """Work out what needs what (references between packages, and which tray items use
+        what) once per index and Tray, in the background."""
+        if (not self._index_ready or self._usage_gen == self._mods_gen
+                or (self._usage_task is not None and self._usage_task.running)):
+            return
+        gen = self._mods_gen
+        tray_dir, mods_dir = self.folders.tray, self.folders.mods
+        self._usage_tray_stamp = _folder_stamp(tray_dir)
+        shown = {k[1] for k in KINDS if k[1] is not None}
+
+        def work(task: BackgroundTask):
+            with ResourceIndex() as ix, DependencyIndex() as deps:
+                deps.update(ix, lambda phase, done, total: task.report(phase, done, total),
+                            task.cancelled)
+                # The Tray as it is now (the gallery shows it as it was at start).
+                try:
+                    items, failed = tray.scan_tray(tray_dir) if tray_dir else (None, [])
+                except OSError:
+                    items, failed = None, []
+                if items is None:
+                    usage = TrayUsage(tray_read=False)
+                else:
+                    usage = scan_usage([i for i in items if i.type in shown], ix,
+                                       lambda done, total: task.report("tray", done, total),
+                                       task.cancelled)
+                    usage.unreadable += [path.name for path, _reason in failed]
+                # Packages the index couldn't read hold references nobody knows about.
+                broken = list(deps.unreadable) + [
+                    Path(p) for p, _e in ix.failed_packages()
+                    if mods_dir is not None and Path(p).is_relative_to(mods_dir)]
+                return usage, broken
+
+        task = BackgroundTask(work)
+        task.progress.connect(lambda args: gen == self._mods_gen and self._usage_progress(*args))
+        task.finished.connect(lambda result: self._usage_finished(gen, *result, ""))
+        task.failed.connect(lambda e: self._usage_finished(gen, None, [], describe_error(e)))
+        task.aborted.connect(lambda: self._usage_aborted(task))
+        self._usage_task = task
+        task.start()
+
+    def _usage_aborted(self, task: BackgroundTask) -> None:
+        """Cancelled because the index or the Tray changed: start over for the new state."""
+        if self._usage_task is task:
+            self._usage_task = None
+        if self._kind is MODS:
+            self._start_usage()
+
+    def _usage_progress(self, phase: str, done: int, total: int) -> None:
+        line = {"read": f"Reading how your CC fits together: {done:,} of {total:,} packages. "
+                        "Only the first time takes a while; after that, only packages that "
+                        "changed are read.",
+                "match": f"Matching objects with meshes in other packages: {done:,} of "
+                         f"{total:,} packages.",
+                "tray": f"Reading your Tray: {done:,} of {total:,} items."}[phase]
+        self.packages.show_progress("Working out what uses it", line, done, total)
+
+    def _usage_finished(self, gen: int, usage: TrayUsage | None, unreadable: list,
+                        error: str) -> None:
+        self._usage_task = None
+        if gen != self._mods_gen:
+            if self._kind is MODS:
+                self._start_usage()  # the index or the Tray changed meanwhile
+            return
+        # A failure isn't remembered as done: picking a package tries again.
+        self._usage_gen = gen if usage is not None else -1
+        self._usage, self._usage_error, self._unreadable = usage, error, unreadable
+        if self._package is None:
+            self.packages.clear_progress()
+        if self._package is not None and self.packages.report is not None:
+            self._load_package_usage()
+
+    def _leave_received(self, *_args) -> None:
+        if self.right.currentWidget() is self.received:
+            self._close_received()
+
+    def _mods_clicked(self, index) -> None:
+        """A click on the package already chosen: back from a zip, or a retry when it isn't
+        shown (its report couldn't be read, it was gone, or what needs it failed)."""
+        self._leave_received()
+        package = index.data(PackageRole) if index.isValid() else None
+        if package is not None and (self.packages.report is None or self.packages.failed):
+            self._package_selected(package)
+
+    def _package_chosen(self, package) -> None:
+        if package is not None and self.right.currentWidget() is self.received:
+            self._close_received()
+        self._package_selected(package)
+
+    def _package_selected(self, package) -> None:
+        self._package = package
+        self._package_gen += 1
+        if package is None:
+            self.packages.show_idle()
+            return
+        gen = self._package_gen
+        path = package.path
+        title = PurePosixPath(package.rel).stem
+        # Only say "Reading" if it takes long enough to notice (a big merge); avoids a flash.
+        QTimer.singleShot(250, lambda: gen == self._package_gen
+                          and self._package_loading == gen and self.packages.show_loading(title))
+        self._package_loading = gen
+
+        def work():
+            with ResourceIndex() as ix:
+                return package_report(path, ix)
+
+        def done(report) -> None:
+            if gen != self._package_gen:
+                return
+            self._package_loading = -1
+            self.packages.show_report(report)
+            self._load_package_extras(report)
+            if self._usage_gen == self._mods_gen:
+                self._load_package_usage()
+            elif self._usage is None and self._usage_error:
+                self._usage_error = ""
+                self._start_usage()  # try again; the page shows its progress
+
+        def failed(error: Exception) -> None:
+            if gen == self._package_gen:
+                self._package_loading = -1
+                self.packages.report = None
+                self.packages.show_message(f"Couldn't read {package.rel}",
+                                           f"{describe_error(error)}. If the index is being "
+                                           "updated, wait for it to finish.")
+
+        run_in_background(work, done, failed)
+
+    def _load_package_extras(self, report) -> None:
+        """Names and thumbnails of the items in a package, read off the UI thread."""
+        refs, path = report.items, report.path
+        if not refs:
+            return
+        run_in_background(lambda: item_names(refs),
+                          lambda names: self.packages.set_names(path, names), lambda _e: None)
+        if len(refs) <= MAX_CARDS:  # a bigger package is shown as a list, without pictures
+            self._load_thumbnails(refs,
+                                  lambda images: self.packages.set_thumbnails(path, images, True))
+
+    def _load_package_usage(self) -> None:
+        report, usage, gen = self.packages.report, self._usage, self._package_gen
+        if usage is None:  # working it out failed: say so, claim nothing about what's needed
+            self.packages.set_usage_failed(report.path, self._usage_error)
+            return
+        unreadable = list(self._unreadable)
+
+        def work():
+            with ResourceIndex() as ix, DependencyIndex() as deps:
+                via = texture_needs(report, deps, ix)  # used by both
+                return users(report, deps, usage, ix, via), dependents(report, deps, ix, via)
+
+        def done(result) -> None:
+            if gen == self._package_gen:
+                found, broken = result
+                self.packages.set_usage(report.path, found, broken, unreadable, usage.tray_read,
+                                        usage.unreadable)
+
+        def failed(error: Exception) -> None:
+            if gen == self._package_gen:
+                self.packages.set_usage_failed(report.path, describe_error(error))
+
+        run_in_background(work, done, failed)
+
+    def _show_package_path(self, path: Path) -> None:
+        """Open another package (a "needs files from it" link)."""
+        if not self.mods_list.select_path(path):
+            self.search.clear()
+            self.mods_list.select_path(path)
+
+    def _show_tray_item(self, item: tray.TrayItem) -> None:
+        """Open a tray item (a "Used by" link): its tab, with the search cleared."""
+        kind = next((k for k in KINDS if k[1] == item.type), None)
+        if kind is None:
+            return
+        self.search.clear()
+        self._set_kind(kind)
+        if not self.trays.select_item(item):  # saved since the gallery was read
+            self._refresh_tray(lambda: self.trays.select_item(item))
+
+    def _refresh_tray(self, then=None) -> None:
+        """Read the Tray again (it changed while TrayTrim was open), keeping what's chosen."""
+        tray_dir, gen = self.folders.tray, self._tray_gen
+        if tray_dir is None or not self._tray_ready:
+            return
+
+        def done(result) -> None:
+            if gen != self._tray_gen:
+                return
+            items, _failed = result
+            shown = {k[1] for k in KINDS}
+            known = {i.instance for i in self.trays.source.items}
+            fresh = [i for i in items if i.type in shown]
+            if not self.trays.replace_items(fresh):
+                self._select(None)  # the chosen item is gone from the Tray
+            elif self._selected is not None:
+                now = next((i for i in fresh if i.instance == self._selected.instance), None)
+                if now is not None and (now.modified, now.files) != (self._selected.modified,
+                                                                      self._selected.files):
+                    self._select(now)  # re-saved in the game: read it again, choices kept
+            self._search_changed(self.search.text())
+            added = [i for i in fresh if i.instance not in known]
+            if added:
+                self._load_gallery_images(gen, added)
+            if then is not None:
+                then()
+
+        run_in_background(lambda: tray.scan_tray(tray_dir), done, lambda _e: None)
+
+    # Exporting one CC item
+
+    def _household_copies(self) -> dict:
+        """The copies the user chose for the household on screen ({key: package})."""
+        return dict(self._choice(self._selected.instance).copies) if self._selected else {}
+
+    def _export_item(self, ref, name, copies: dict | None = None) -> None:
+        if not self._index_ready or self._item_planning:
+            return  # one at a time: a second click mustn't open a second dialog
+        self._item_planning = True
+        title = display_name(ref, name) or "CC item"
+        self.statusBar().showMessage(f"Working out what {title} needs\u2026")
+
+        def work():
+            with ResourceIndex() as ix:
+                return build_plan([ref], ix, copies_chosen=copies)
+
+        def done(plan) -> None:
+            self._item_planning = False
+            self.statusBar().clearMessage()
+            if not plan.resources:
+                self.statusBar().showMessage(f"{title} has nothing to export: its files are "
+                                             "the game's own.", 10_000)
+                return
+            request = ExportRequest(None, None, [ref], plan, [], set(), safe_name(title, "Item"),
+                                    self.folders.user_dir, self.folders.game_dir,
+                                    item_name=title)
+            self._run_dialog(ExportDialog(request, self.settings, self))
+
+        def failed(error: Exception) -> None:
+            self._item_planning = False
+            self.statusBar().showMessage(f"Couldn't work out what {title} needs: "
+                                         f"{describe_error(error)}.", 10_000)
+
+        run_in_background(work, done, failed)
+
+    # Check a zip
+
+    def _choose_zip(self) -> None:
+        downloads = Path.home() / "Downloads"  # where a zip someone sent usually is
+        start = downloads if downloads.is_dir() else Path.home()
+        chosen, _ = QFileDialog.getOpenFileName(self, "Check a zip", str(start),
+                                                "Zip files (*.zip)")
+        if chosen:
+            self._open_zip(Path(chosen))
+
+    def _open_zip(self, path: Path) -> None:
+        if self._received_task is not None and self._received_task.running:
+            self._received_task.cancel()
+        self._drop_received()
+        self.right.setCurrentWidget(self.received)
+        self.received.user_dir = self.folders.user_dir
+        if not self._index_ready and self.index.running:  # it's being built: wait for it
+            self._pending_zip = path
+            self.received.show_working(path)
+            self.received.verdict.show_working(
+                "Checking the zip", "Waiting for the index of your Mods and game packages.")
+            return
+        self.received.show_working(path)
+
+        def work(task: BackgroundTask) -> Received:
+            with ResourceIndex() as ix:
+                return check_received(path, ix, task.report, task.cancelled)
+
+        # A check that finished despite a late cancel still hands its result over, so its
+        # temporary folder is deleted (_received_finished closes what's no longer wanted).
+        task = BackgroundTask(work, keep_late_result=True)
+        task.progress.connect(lambda args: self._received_task is task
+                              and self.received.show_working(path, *args))
+        task.finished.connect(lambda r: self._received_finished(task, r))
+        task.failed.connect(lambda e: self._received_task is task
+                            and self.received.show_error(path, describe_error(e)))
+        self._received_task = task
+        task.start()
+
+    def _received_finished(self, task: BackgroundTask, r: Received) -> None:
+        if self._received_task is not task or self.right.currentWidget() is not self.received:
+            r.close()  # closed or replaced meanwhile
+            return
+        self._received_task = None
+        self._received = r
+        self.received.show_received(r)
+        if not r.cc:
+            return
+        # Both read the zip's temporary folder: it's deleted only once they're done. A zip with
+        # more items than cards are shown for gets a list, without pictures.
+        refs = r.cc
+        pictures = len(refs) <= MAX_CARDS
+        r.jobs += 2 if pictures else 1
+
+        def named(names) -> None:
+            self.received.set_names(r, names)
+            r.job_done()
+
+        run_in_background(lambda: item_names(refs), named, lambda _e: r.job_done())
+        if pictures:
+            self._load_thumbnails(refs,
+                                  lambda images: self.received.set_thumbnails(r, images, True),
+                                  r.index_path, r.job_done)
+
+    def _drop_received(self, now: bool = False) -> None:
+        if self._received is not None:
+            self._received.close(now)
+            self._received = None
+        self._pending_zip = None
+
+    def _close_received(self) -> None:
+        if self._received_task is not None and self._received_task.running:
+            self._received_task.cancel()
+        self._received_task = None
+        self._drop_received()
+        self.received.received = None
+        self.right.setCurrentWidget(self.packages if self._kind is MODS else self.household)
+
+    @staticmethod
+    def _dropped_zip(event) -> Path | None:
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if len(urls) == 1 and urls[0].isLocalFile():
+            path = Path(urls[0].toLocalFile())
+            if path.suffix.lower() == ".zip":
+                return path
+        return None
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._dropped_zip(event) is not None:
+            event.acceptProposedAction()
+            self._drop_overlay.show_over_parent()
+
+    def dragLeaveEvent(self, event) -> None:  # noqa: N802
+        self._drop_overlay.hide()
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        self._drop_overlay.hide()
+        path = self._dropped_zip(event)
+        if path is not None:
+            event.acceptProposedAction()
+            self._open_zip(path)
 
     # Folders
 
@@ -643,7 +1285,27 @@ class MainWindow(QMainWindow):
             self._folders_changed()
 
     def _refresh_index(self) -> None:
+        self._last_check = time.monotonic()
         self.index.refresh(self.folders.mods, self.folders.game_dir)
+
+    def _check_for_changes(self) -> None:
+        """Coming back to the window: the user may have deleted or added CC meanwhile (the
+        Mods tab is for deciding that), or saved something to the Tray in the game. Listing
+        the folders takes a moment; only packages that changed are read, and the views are
+        only updated if something did."""
+        if (not self._index_ready or self.index.running
+                or time.monotonic() - self._last_check < 5):
+            return
+        stamp = _folder_stamp(self.folders.tray)
+        if self._tray_ready and stamp != self._tray_stamp:  # saved in the game meanwhile
+            self._tray_stamp = stamp
+            self._refresh_tray()
+        if self._usage_gen == self._mods_gen and stamp != self._usage_tray_stamp:
+            self._tray_dirty = True  # worked out again once the check below is done
+        self._last_check = time.monotonic()
+        # Mods only: the game install doesn't change while TrayTrim is open (a patch needs the
+        # game closed and is picked up at the next start), and listing it takes longest.
+        self.index.refresh(self.folders.mods, None, quiet=True, game_root=self.folders.game_dir)
 
     def _show_skipped(self) -> None:
         if self.index.last_result is not None:
@@ -681,13 +1343,15 @@ class MainWindow(QMainWindow):
         rolls back anything unfinished, so the next start resumes), plans and name reading
         stop. The app waits for the threads before it exits (tasks.shutdown)."""
         self.index.stop()
-        if self._plan_task is not None:
-            self._plan_task.cancel()
+        for task in (self._plan_task, self._usage_task, self._received_task):
+            if task is not None:
+                task.cancel()
         if self._names_cancel is not None:
             self._names_cancel.set()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.stop_work()
+        self._drop_received(now=True)
         self.settings.window_geometry = bytes(self.saveGeometry().toBase64()).decode()
         try:
             self.settings.save()

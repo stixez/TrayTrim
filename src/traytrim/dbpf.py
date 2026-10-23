@@ -41,6 +41,9 @@ _SIZE_MASK = 0x7FFFFFFF
 _U32 = 0xFFFFFFFF
 _U64 = 0xFFFFFFFFFFFFFFFF
 _MAX_PACKAGE_SIZE = _U32  # offsets in the index are 32-bit
+MAX_PACKAGE_SIZE = _MAX_PACKAGE_SIZE
+# Larger than any real resource (the biggest are textures of some tens of MB unpacked).
+MAX_RESOURCE_SIZE = 256 << 20
 _HEX = r"(?:0[xX])?([0-9A-Fa-f]{1,%d})"
 _KEY_RE = re.compile(rf"{_HEX % 8}[:-]{_HEX % 8}[:-]{_HEX % 16}")
 
@@ -253,6 +256,10 @@ def read_index(path: str | os.PathLike[str]) -> tuple[Header, list[IndexEntry]]:
 
 
 def decompress(raw: bytes, compression: int, mem_size: int, what: str = "resource") -> bytes:
+    if compression != COMP_NONE and mem_size > MAX_RESOURCE_SIZE:
+        # A few MB of compressed data can claim gigabytes: CC packages come from anywhere.
+        raise DbpfError(f"{what} says it unpacks to {mem_size:,} bytes, more than any Sims 4 "
+                        "resource; it's damaged or not what it claims.")
     if compression == COMP_NONE:
         data = raw
     elif compression == COMP_ZLIB:

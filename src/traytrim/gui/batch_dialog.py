@@ -20,7 +20,7 @@ from traytrim.gui.gallery import subtitle
 from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import RADIUS, SPACE
-from traytrim.gui.widgets import ElidedLabel, Notice, SimChip, label, link_button
+from traytrim.gui.widgets import ElidedLabel, Notice, SimChip, SupportLine, label, link_button
 from traytrim.index import ResourceIndex
 from traytrim.settings import Settings
 from traytrim.tray import TrayItem
@@ -298,6 +298,8 @@ class BatchDialog(QDialog):
         page = QWidget()
         col = QVBoxLayout(page)
         col.setContentsMargins(0, SPACE["m"], 0, 0)
+        self.support = SupportLine()  # shown once something was saved
+        self.support.hide()
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         show = QPushButton("Show folder")
@@ -309,6 +311,8 @@ class BatchDialog(QDialog):
         buttons.addWidget(show)
         buttons.addWidget(done)
         col.addStretch(1)
+        col.addWidget(self.support)
+        col.addSpacing(SPACE["s"])
         col.addLayout(buttons)
         self.done_button = done
         return page
@@ -493,6 +497,7 @@ class BatchDialog(QDialog):
 
     def _finish(self, saved: bool) -> None:
         self.bar.setValue(self.bar.maximum())
+        self.support.setVisible(saved)
         if saved:
             self.settings.output_dir = str(self.out_dir)
             try:

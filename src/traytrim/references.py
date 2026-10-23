@@ -134,6 +134,12 @@ def scan_instances(data: bytes, candidates: set[int]) -> set[int]:
     return found
 
 
+def may_refer(type_id: int) -> bool:
+    """Whether a resource of this type can refer to others (else references() is always
+    empty, and the resource needn't be read)."""
+    return type_id in (restypes.CASP, restypes.GEOM) or type_id not in _NO_SCAN_TYPES
+
+
 def references(key: ResourceKey, data: bytes,
                package_keys: dict[int, list[ResourceKey]]) -> list[Reference]:
     """Keys `key` (with decompressed `data`) refers to. package_keys maps instance -> keys of the

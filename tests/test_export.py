@@ -8,11 +8,11 @@ import pytest
 
 from test_plan import located, world  # noqa: F401  (fixture)
 from traytrim import dbpf
-from traytrim.export import (ExportOptions, default_base_name, export_household, load_history,
-                             safe_name)
+from traytrim.export import (ExportOptions, default_base_name, export_household, export_item,
+                             load_history, safe_name)
 from traytrim.plan import build_plan
 from traytrim.tray import HouseholdContents, RefKind, SimContents, TrayItem, TraySim
-from traytrim.verify import verify_export
+from traytrim.verify import check_zip, verify_export
 
 
 @pytest.fixture
@@ -153,3 +153,25 @@ def test_a_changed_source_package_stops_the_export(tmp_path, household):
         export_household(item, contents, refs, plan, [], {1},
                          ExportOptions(tmp_path / "out", "x", False), index)
     assert [p.name for p in (tmp_path / "out").iterdir()] == []
+
+
+def test_one_item_exports_on_its_own(tmp_path, world):  # noqa: F811
+    index, k = world
+    recolor = located(index, RefKind.CAS_PART, k["recolor"])
+    plan = build_plan([recolor], index)
+    result = export_item(recolor, "Soft Bob", plan,
+                         ExportOptions(tmp_path / "Desktop", "Soft_Bob", True), index)
+    assert result.verification.ok, [c.problems for c in result.verification.checks]
+    assert result.test_kit is None
+    assert result.verification.checks[-1].name == "The item is included"
+    with zipfile.ZipFile(result.zip_path) as z:
+        assert sorted(z.namelist()) == ["Mods/Soft_Bob_TrayTrim.package", "README.txt",
+                                        "report.json"]
+        report = json.loads(z.read("report.json"))
+        readme = z.read("README.txt").decode()
+    # The recolor brings the mesh it needs from the other package.
+    assert {f["key"] for f in report["files"]} == {str(k["recolor"]), str(k["shared_mesh"])}
+    assert report["kind"] == "item" and report["name"] == "Soft Bob"
+    assert "Copy Mods/Soft_Bob_TrayTrim.package" in readme and "Tray/" not in readme
+    assert check_zip(result.zip_path).ok
+    assert load_history()[0]["kind"] == "item" and load_history()[0]["name"] == "Soft Bob"

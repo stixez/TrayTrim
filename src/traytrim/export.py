@@ -21,7 +21,7 @@ import tempfile
 import threading
 import time
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable
 
@@ -149,12 +149,21 @@ def export_household(item: TrayItem, contents: HouseholdContents, refs: list[Loc
                         progress, cancel)
 
 
+def export_item(ref: LocatedRef, name: str, plan: Plan, options: ExportOptions,
+                index: ResourceIndex, progress: Progress | None = None,
+                cancel: threading.Event | None = None) -> ExportResult:
+    """Export one CC item on its own: a package with the item and everything it needs, no tray
+    files and no test kit."""
+    return export_parts([], [ref], plan, [], replace(options, test_kit=False), index, progress,
+                        cancel, item_name=name)
+
+
 def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
                  gameplay: list[GameplayMod], options: ExportOptions, index: ResourceIndex,
                  progress: Progress | None = None,
-                 cancel: threading.Event | None = None) -> ExportResult:
+                 cancel: threading.Event | None = None, item_name: str = "") -> ExportResult:
     """Export tray items whose CC is planned together (`refs` and `plan` cover all of them)
-    into one zip with one package."""
+    into one zip with one package. With no parts, `refs` is one CC item named `item_name`."""
     out_dir = options.out_dir
     reason = forbidden_reason(out_dir, options.user_dir, options.game_dir)
     if reason:
@@ -171,23 +180,28 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
 
         verification = verify_export(
             package_path, plan, refs, index,
-            (lambda d, t: progress("verify", d, t)) if progress else None, cancel)
+            (lambda d, t: progress("verify", d, t)) if progress else None, cancel,
+            from_tray=bool(parts))
 
         tray_dir = content / "Tray"
-        tray_dir.mkdir()
+        if parts:
+            tray_dir.mkdir()
         for part in parts:
             for f in part.item.files:
                 shutil.copy2(f, tray_dir / f.name)
 
-        summary = summarize(refs)
-        report = _report(parts, plan, summary, gameplay, verification, package_name)
+        if parts:
+            summary = summarize(refs)
+            report = _report(parts, plan, summary, gameplay, verification, package_name)
+            readme = _readme(parts, plan, summary, gameplay, verification, package_name)
+        else:
+            report = _item_report(item_name, plan, verification, package_name)
+            readme = _item_readme(item_name, plan, verification, package_name)
         (content / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-        (content / "README.txt").write_text(
-            _readme(parts, plan, summary, gameplay, verification, package_name),
-            encoding="utf-8")
+        (content / "README.txt").write_text(readme, encoding="utf-8")
 
         staged_kit = None
-        if options.test_kit:
+        if options.test_kit and parts:
             staged_kit = stage / "kit"
             _test_kit(staged_kit, package_path, tray_dir, options.user_dir, parts)
 
@@ -210,7 +224,7 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
                               zip_path.stat().st_size, verification, kit, gameplay)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
-    _add_to_history(parts, result)
+    _add_to_history(parts, result, item_name)
     return result
 
 
@@ -273,6 +287,33 @@ def _kind(parts: list[Part]) -> str:
     return parts[0].kind if len(parts) == 1 else "bundle"
 
 
+def _files(plan: Plan) -> list[dict]:
+    return [{"key": str(r.key), "type": restypes.name(r.key.type), "source": r.copy.rel,
+             "bytes": r.size, "via": r.via}
+            for r in sorted(plan.resources.values(), key=lambda r: r.key)]
+
+
+def _dependency_packs(plan: Plan) -> list[str]:
+    """Game packs the planned CC takes meshes or textures from, base game last."""
+    packs = set().union(*plan.from_game.values()) if plan.from_game else set()
+    return sorted(packs - {"base"}) + (["base"] if "base" in packs else [])
+
+
+def _conflicts(plan: Plan) -> list[dict]:
+    return [{"key": str(c.key), "used": c.copy.rel, "copies": [h.rel for h in c.copies]}
+            for c in plan.conflicts]
+
+
+def _missing_files(plan: Plan) -> list[dict]:
+    return [{"key": str(k), "needed_by": sorted(str(p) for p in parents)}
+            for k, parents in plan.missing.items()]
+
+
+def _checks(verification: Verification) -> list[dict]:
+    return [{"check": c.name, "passed": c.passed, "detail": c.detail, "problems": c.problems}
+            for c in verification.checks]
+
+
 def _report(parts: list[Part], plan: Plan, summary, gameplay, verification,
             package_name) -> dict:
     first = _part_info(parts[0])
@@ -287,23 +328,60 @@ def _report(parts: list[Part], plan: Plan, summary, gameplay, verification,
         "package": package_name,
         "package_bytes": plan.export_size,
         "whole_packages_bytes": plan.whole_size,
-        "files": [{"key": str(r.key), "type": restypes.name(r.key.type), "source": r.copy.rel,
-                   "bytes": r.size, "via": r.via}
-                  for r in sorted(plan.resources.values(), key=lambda r: r.key)],
+        "files": _files(plan),
         "left_out": sorted(f"{r.kind.value}:{r.instance:016X}" for r in plan.excluded),
         "game_packs": summary.packs,
-        "conflicts": [{"key": str(c.key), "used": c.copy.rel,
-                       "copies": [h.rel for h in c.copies]} for c in plan.conflicts],
+        "conflicts": _conflicts(plan),
         "default_replacements": [{"key": str(d.key), "source": d.copy.rel}
                                  for d in plan.default_replacements],
-        "missing_files": [{"key": str(k), "needed_by": sorted(str(p) for p in parents)}
-                          for k, parents in plan.missing.items()],
+        "missing_files": _missing_files(plan),
         "not_installed_items": [f"{r.ref.kind.value}:{r.ref.instance:016X}"
                                 for r in summary.missing],
         "gameplay_mods": [m.rel for m in gameplay],
-        "verification": [{"check": c.name, "passed": c.passed, "detail": c.detail,
-                          "problems": c.problems} for c in verification.checks],
+        "verification": _checks(verification),
     }
+
+
+def _item_report(name: str, plan: Plan, verification, package_name) -> dict:
+    return {
+        "traytrim": __version__,
+        "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "name": name,
+        "kind": "item",
+        "items": [],
+        "package": package_name,
+        "package_bytes": plan.export_size,
+        "whole_packages_bytes": plan.whole_size,
+        "files": _files(plan),
+        "game_packs": _dependency_packs(plan),
+        "conflicts": _conflicts(plan),
+        "missing_files": _missing_files(plan),
+        "verification": _checks(verification),
+    }
+
+
+def _item_readme(name: str, plan: Plan, verification, package_name) -> str:
+    lines = [f"{name}: exported with TrayTrim {__version__}", "",
+             "How to install",
+             f"  Copy Mods/{package_name} into Documents/Electronic Arts/The Sims 4/Mods",
+             "",
+             "What's in the package",
+             f"  This one item and everything it needs: {len(plan.resources):,} files "
+             f"({human_size(plan.export_size)}), taken from {len(plan.source_packages):,} CC "
+             "packages.",
+             f"  Game packs it uses content from: {_packs_text(_dependency_packs(plan))}."]
+    if plan.missing:
+        lines += ["",
+                  "Missing before export",
+                  f"  {len(plan.missing)} files it needs weren't installed when this was "
+                  "exported, so they're not included."]
+    lines += ["", "Checked after export"]
+    lines += [f"  [{'ok' if c.passed else 'FAILED'}] {c.name}" for c in verification.checks]
+    lines += ["",
+              "Exports are meant for your own backups and transfers, or for CC you have the",
+              "rights to share. Many creators don't allow re-uploading their CC.",
+              ""]
+    return "\n".join(lines)
 
 
 def _readme(parts: list[Part], plan: Plan, summary, gameplay, verification,
@@ -507,12 +585,12 @@ def load_history() -> list[dict]:
     return data if isinstance(data, list) else []
 
 
-def _add_to_history(parts: list[Part], result: ExportResult) -> None:
+def _add_to_history(parts: list[Part], result: ExportResult, item_name: str = "") -> None:
     entries = load_history()
     entries.insert(0, {
         "time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "name": bundle_title(parts),
-        "kind": _kind(parts),
+        "name": bundle_title(parts) if parts else item_name,
+        "kind": _kind(parts) if parts else "item",
         "tray_id": parts[0].item.id_text if len(parts) == 1 else None,
         "zip": str(result.zip_path),
         "bytes": result.zip_size,

@@ -229,6 +229,13 @@ def stylesheet(p: Palette) -> str:
         text-decoration: underline;
     }}
     QPushButton[kind="link"]:focus {{ border: none; padding: 0; outline: 2px solid {p.focus}; }}
+    QPushButton[kind="titleTab"] {{
+        background: transparent; border: none; padding: 0; color: {p.text_tertiary};
+        font-size: {TYPE['title']}px; font-weight: 600;
+    }}
+    QPushButton[kind="titleTab"]:hover {{ background: transparent; color: {p.text_secondary}; }}
+    QPushButton[kind="titleTab"]:checked {{ color: {p.text}; }}
+    QPushButton[kind="titleTab"]:focus {{ border: none; padding: 0; outline: 2px solid {p.focus}; }}
     QPushButton:disabled {{ color: {p.text_tertiary}; border-color: {p.divider}; background: {p.surface}; }}
 
     QScrollArea, QScrollArea > QWidget > QWidget#content {{ background: {p.window}; }}

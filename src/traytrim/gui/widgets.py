@@ -2,21 +2,47 @@
 
 from __future__ import annotations
 
-from PySide6.QtCore import QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import (QAbstractButton, QGridLayout, QHBoxLayout, QLabel, QPushButton,
-                               QSizePolicy, QVBoxLayout, QWidget)
+import html
+import re
 
-from traytrim.gui import icons, theme
+from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt
+from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtGui import Qt as GuiQt
+from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QGridLayout, QHBoxLayout,
+                               QLabel, QPushButton, QSizePolicy, QToolTip, QVBoxLayout, QWidget)
+
+from traytrim import SUPPORT_URL
+from traytrim.gui import icons, system, theme
 from traytrim.gui.theme import SPACE
 
 
+_BREAK_AFTER = re.compile(r"([_\-./\\])(?=\S)")
+
+
+def breakable(text: str) -> str:
+    """Text that can wrap inside long names: a zero-width space after _ - . / and \\, the way
+    package and file names are joined ("Soft_Bob_Mesh_v2.package"). Labels wrap only at spaces,
+    so a name without any would push the page wider than the window."""
+    return _BREAK_AFTER.sub("\\1\u200b", text)
+
+
+class TextLabel(QLabel):
+    """A label for text (never markup); when it wraps, long names can wrap too (breakable)."""
+
+    def setText(self, text: str) -> None:  # noqa: N802 (Qt naming)
+        super().setText(breakable(text) if self.wordWrap() else text)
+
+
 def label(text: str = "", role: str | None = None, *, wrap: bool = False) -> QLabel:
-    w = QLabel(text)
+    w = TextLabel()
+    # Always plain: names come from CC packages, tray files and received zips, and Qt would
+    # render text that looks like HTML as HTML.
+    w.setTextFormat(Qt.TextFormat.PlainText)
     if role:
         w.setProperty("role", role)
     if wrap:
         w.setWordWrap(True)
+    w.setText(text)
     w.setTextInteractionFlags(Qt.TextInteractionFlag.NoTextInteraction)
     return w
 
@@ -44,6 +70,7 @@ class ElidedLabel(QLabel):
 
     def __init__(self, text: str = "", role: str | None = None, max_width: int = 360):
         super().__init__()
+        self.setTextFormat(Qt.TextFormat.PlainText)  # paths can hold anything; see label()
         if role:
             self.setProperty("role", role)
         self._full = ""
@@ -196,6 +223,10 @@ class SimChip(QAbstractButton):
                          Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, self.text())
 
 
+PAGE_DETAILS = 200  # detail rows a notice shows at a time
+DETAIL_ITEM_WIDTH = 320
+
+
 class Notice(QWidget):
     """A calm, one-line notice with an icon, and details that open on request.
 
@@ -216,29 +247,26 @@ class Notice(QWidget):
         col.setSpacing(SPACE["xs"])
         head = QHBoxLayout()
         head.setSpacing(SPACE["m"])
-        head.addWidget(label(title, "noticeTitle"), 1)
+        head.addWidget(label(title, "noticeTitle", wrap=True), 1)
         col.addLayout(head)
         col.addWidget(label(body, "secondary", wrap=True))
         outer.addLayout(col, 1)
         if details:
             box = QWidget()
-            grid = QGridLayout(box)
-            grid.setContentsMargins(0, SPACE["s"], 0, 0)
+            box_col = QVBoxLayout(box)
+            box_col.setContentsMargins(0, SPACE["s"], 0, 0)
+            box_col.setSpacing(SPACE["s"])
+            grid = QGridLayout()
             grid.setHorizontalSpacing(SPACE["l"])
             grid.setVerticalSpacing(SPACE["xs"])
             grid.setColumnStretch(1, 1)
-            for i, (what, info, tip, *action) in enumerate(details):
-                a, b = label(what, "detailItem"), label(info, "secondary", wrap=True)
-                a.setToolTip(tip)
-                b.setToolTip(tip)
-                grid.addWidget(a, i, 0, Qt.AlignmentFlag.AlignTop)
-                grid.addWidget(b, i, 1)
-                if action:
-                    text, callback = action[0]
-                    link = link_button(text)
-                    link.setAccessibleName(f"{text}: {what}, {info}")
-                    link.clicked.connect(lambda _c=False, f=callback, w=link: f(w))
-                    grid.addWidget(link, i, 2, Qt.AlignmentFlag.AlignTop)
+            box_col.addLayout(grid)
+            self._details, self._grid, self._shown = details, grid, 0
+            # Rows a page at a time: thousands of them (a zip of a whole Mods folder) take
+            # seconds and hundreds of MB to lay out at once.
+            self._more = ShowMore(len(details), self._add_rows, PAGE_DETAILS, "rows")
+            box_col.addWidget(self._more)
+            self._add_rows()
             box.setVisible(expanded)
             col.addWidget(box)
         for text, callback in actions or []:
@@ -258,3 +286,129 @@ class Notice(QWidget):
 
             toggle.clicked.connect(flip)
             head.addWidget(toggle, 0, Qt.AlignmentFlag.AlignTop)
+
+    def _add_rows(self) -> None:
+        start = self._shown
+        for i, (what, info, tip, *action) in enumerate(
+                self._details[start:start + PAGE_DETAILS], start):
+            a, b = label(what, "detailItem", wrap=True), label(info, "secondary", wrap=True)
+            # As wide as it needs up to a limit; a longer package path wraps instead.
+            font = QFont(a.font())
+            font.setWeight(QFont.Weight.Medium)  # role "detailItem" in the stylesheet
+            wanted = QFontMetrics(font).horizontalAdvance(what) + SPACE["s"]
+            a.setMinimumWidth(min(wanted, DETAIL_ITEM_WIDTH))
+            a.setMaximumWidth(DETAIL_ITEM_WIDTH)
+            a.setToolTip(tip)
+            b.setToolTip(tip)
+            self._grid.addWidget(a, i, 0, Qt.AlignmentFlag.AlignTop)
+            self._grid.addWidget(b, i, 1)
+            if action:
+                text, callback = action[0]
+                link = link_button(text)
+                link.setAccessibleName(f"{text}: {what}, {info}")
+                link.clicked.connect(lambda _c=False, f=callback, w=link: f(w))
+                self._grid.addWidget(link, i, 2, Qt.AlignmentFlag.AlignTop)
+        self._shown = min(start + PAGE_DETAILS, len(self._details))
+        self._more.set_shown(self._shown)
+
+
+class ShowMore(QWidget):
+    """The end of a long list shown a page at a time: "Showing 200 of 4,812 rows" and a link
+    for the next page. Hidden once everything is shown."""
+
+    def __init__(self, total: int, on_more, step: int, noun: str = "items", parent=None):
+        super().__init__(parent)
+        self._total, self._step, self._noun = total, step, noun
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE["m"])
+        self._text = label("", "secondary")
+        row.addWidget(self._text)
+        self._link = link_button("")
+        self._link.clicked.connect(on_more)
+        row.addWidget(self._link)
+        row.addStretch(1)
+        self.set_shown(0)
+
+    def set_shown(self, shown: int) -> None:
+        left = self._total - shown
+        self.setVisible(left > 0)
+        self._text.setText(f"Showing {shown:,} of {self._total:,} {self._noun}.")
+        self._link.setText(f"Show {min(self._step, left):,} more")
+        self._link.setAccessibleName(f"Show {min(self._step, left):,} more {self._noun}")
+
+
+class DropOverlay(QWidget):
+    """Covers its parent while a file is dragged over the window: what dropping it does."""
+
+    def __init__(self, title: str, body: str, parent: QWidget):
+        super().__init__(parent)
+        self._title, self._body = title, body
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def show_over_parent(self) -> None:
+        self.setGeometry(self.parentWidget().rect())
+        self.raise_()
+        self.show()
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = theme.current()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        fill = QColor(p.window)
+        fill.setAlpha(248)
+        painter.fillRect(self.rect(), fill)
+        box = QRectF(self.rect()).adjusted(SPACE["xl"], SPACE["xl"], -SPACE["xl"], -SPACE["xl"])
+        pen = QPen(QColor(p.border_strong), 2, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(box, 12, 12)
+        painter.setPen(QColor(p.text))
+        painter.setFont(theme.ui_font("headline", QFont.Weight.DemiBold))
+        centre = box.center().y()
+        painter.drawText(QRectF(box.left(), centre - 40, box.width(), 40),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignBottom, self._title)
+        painter.setPen(QColor(p.text_secondary))
+        painter.setFont(theme.ui_font())
+        painter.drawText(QRectF(box.left(), centre + 8, box.width(), 30),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop, self._body)
+
+
+class PlainToolTips(QObject):
+    """Shows every tooltip as plain text, like the labels: the names and paths in them come
+    from CC packages, tray files and received zips, and Qt renders text that looks like HTML
+    as HTML. Installed on the application, so it covers item views' tooltips too."""
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802
+        if event.type() != QEvent.Type.ToolTip or not isinstance(obj, QWidget):
+            return False
+        view = obj.parent()
+        if isinstance(view, QAbstractItemView) and obj is view.viewport():
+            index = view.indexAt(event.pos())
+            data = index.data(Qt.ItemDataRole.ToolTipRole) if index.isValid() else None
+            text = str(data) if data else ""
+        else:
+            text = obj.toolTip()
+        if not text or not GuiQt.mightBeRichText(text):
+            return False  # Qt shows it as plain text anyway
+        escaped = html.escape(text).replace("\n", "<br>")
+        QToolTip.showText(event.globalPos(), f"<qt>{escaped}</qt>", obj)
+        return True
+
+
+class SupportLine(QWidget):
+    """A quiet line after a successful export: TrayTrim is free, and a link to support it."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE["s"])
+        row.addWidget(label("TrayTrim is free. If it saved you time, you can", "secondary"))
+        link = link_button("buy me a coffee")
+        link.setToolTip(SUPPORT_URL)
+        link.setAccessibleName("Buy me a coffee (opens buymeacoffee.com)")
+        link.clicked.connect(lambda: system.open_url(SUPPORT_URL))
+        row.addWidget(link)
+        row.addStretch(1)

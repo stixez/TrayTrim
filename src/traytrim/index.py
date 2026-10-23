@@ -62,6 +62,11 @@ def _s64(u: int) -> int:
     return u - (1 << 64) if u >= 1 << 63 else u
 
 
+def _chunks(keys: list, size: int = 2000):
+    for i in range(0, len(keys), size):
+        yield keys[i:i + size]
+
+
 @dataclass(frozen=True)
 class ModsHit:
     path: Path
@@ -78,6 +83,17 @@ class GameHit:
     delta: bool
 
 
+@dataclass(frozen=True)
+class ModsPackageInfo:
+    path: Path
+    rel: str
+    load_order: int
+    size: int
+    mtime_ns: int
+    resources: int
+    items: int = 0  # resources of the types asked for (see mods_packages)
+
+
 @dataclass
 class UpdateResult:
     mods_packages: int = 0
@@ -89,6 +105,7 @@ class UpdateResult:
     too_deep: list[str] = field(default_factory=list)
     mods_depth: int = modsindex.DEFAULT_DEPTH
     cancelled: bool = False
+    changed: bool = False                # packages were added, changed or removed
 
 
 class _Cancelled(Exception):
@@ -216,6 +233,7 @@ class ResourceIndex:
             "SELECT id, path, size, mtime_ns, error, load_order, rel FROM packages "
             "WHERE source=?", (source,))}
         todo = []
+        retries: set[str] = set()
         seen = set()
         for n, (path, rel, pack, delta, order) in enumerate(found):
             if n % 256 == 0 and cancel is not None and cancel.is_set():
@@ -229,14 +247,20 @@ class ResourceIndex:
                 continue
             seen.add(key)
             old = existing.get(key)
-            if old and old[2] == st.st_size and old[3] == st.st_mtime_ns and old[4] is None:
+            same = bool(old) and old[2] == st.st_size and old[3] == st.st_mtime_ns
+            if same and old[4] is None:
                 if source == MODS and (old[5], old[6]) != (order, rel):
                     db.execute("UPDATE packages SET load_order=?, rel=? WHERE id=?",
                                (order, rel, old[0]))
                 continue
+            if same:
+                retries.add(key)  # failed last time, unchanged: read again, but not a change
             todo.append((key, rel, pack, delta, order, st.st_size, st.st_mtime_ns))
         gone = [row[0] for path, row in existing.items() if path not in seen]
         changed = [existing[t[0]][0] for t in todo if t[0] in existing]
+        if (any(t[0] not in retries for t in todo) or gone
+                or stored_root is None or stored_root[0] != root_text):
+            result.changed = True
         if todo or gone:
             # From here until the end of this sync the index is between two states; lookups
             # made meanwhile (another process, or a cancelled run) shouldn't be trusted.
@@ -256,6 +280,8 @@ class ResourceIndex:
             except (dbpf.DbpfError, OSError) as e:
                 error = str(e) if isinstance(e, dbpf.DbpfError) else (e.strerror or str(e))
                 result.failed.append((key, error))
+            if error is None and key in retries:
+                result.changed = True  # readable now
             cur = db.execute(
                 "INSERT INTO packages (source, path, rel, pack, delta, load_order, size, "
                 "mtime_ns, resources, error) VALUES (?,?,?,?,?,?,?,?,?,?)",
@@ -327,6 +353,43 @@ class ResourceIndex:
         return [ModsHit(Path(path), rel, order, dbpf.IndexEntry(key, off, fs, ms, comp))
                 for path, rel, order, off, fs, ms, comp in rows]
 
+    def mods_hits_many(self, keys: list[ResourceKey]) -> dict[ResourceKey, list[ModsHit]]:
+        """mods_hits for many keys in a few queries (a package's worth); keys without any are
+        left out."""
+        out: dict[ResourceKey, list[ModsHit]] = {}
+        paths: dict[str, Path] = {}
+        keys = list(dict.fromkeys(keys))  # a key asked twice would come back twice
+        for chunk in _chunks(keys):
+            # As in mods_keys_for_instances: candidates from one JSON array, the primary key
+            # of mods_res inside the loop.
+            rows = self.db.execute(
+                "SELECT r.inst, r.type, r.grp, p.path, p.rel, p.load_order, r.offset, r.fsize, "
+                "r.msize, r.comp FROM json_each(?) f CROSS JOIN mods_res r "
+                "JOIN packages p ON p.id = r.pkg "
+                "WHERE r.inst = json_extract(f.value, '$[0]') "
+                "AND r.type = json_extract(f.value, '$[1]') "
+                "AND r.grp = json_extract(f.value, '$[2]') ORDER BY p.load_order",
+                (json.dumps([[_s64(k.instance), k.type, k.group] for k in chunk]),))
+            for inst, t, g, path, rel, order, off, fs, ms, comp in rows:
+                key = ResourceKey(t, g, inst + (1 << 64) if inst < 0 else inst)
+                where = paths.get(path) or paths.setdefault(path, Path(path))
+                out.setdefault(key, []).append(
+                    ModsHit(where, rel, order, dbpf.IndexEntry(key, off, fs, ms, comp)))
+        return out
+
+    def game_keys(self, keys: list[ResourceKey]) -> set[ResourceKey]:
+        """Which of these keys the game has."""
+        found: set[ResourceKey] = set()
+        for chunk in _chunks(list(dict.fromkeys(keys))):
+            rows = self.db.execute(
+                "SELECT DISTINCT r.inst, r.type, r.grp FROM json_each(?) f CROSS JOIN game_res r "
+                "WHERE r.inst = json_extract(f.value, '$[0]') "
+                "AND r.type = json_extract(f.value, '$[1]') "
+                "AND r.grp = json_extract(f.value, '$[2]')",
+                (json.dumps([[_s64(k.instance), k.type, k.group] for k in chunk]),))
+            found.update(ResourceKey(t, g, i + (1 << 64) if i < 0 else i) for i, t, g in rows)
+        return found
+
     def game_hits(self, key: ResourceKey) -> list[GameHit]:
         rows = self.db.execute(
             "SELECT p.path, p.rel, p.pack, p.delta FROM game_res r JOIN packages p ON p.id = r.pkg "
@@ -354,14 +417,58 @@ class ResourceIndex:
         if not instances or not types:
             return []
         marks = ",".join("?" * len(types))
-        # The candidates go in as one JSON array, read with json_each, so the lookup writes
-        # nothing. CROSS JOIN fixes the loop order: the candidates outside, the primary key of
-        # mods_res (instance first) inside. Left to itself SQLite scans all of mods_res.
+        found: set[tuple[int, int, int]] = set()
+        for chunk in _chunks([_s64(i) for i in instances], 50_000):
+            # The candidates go in as one JSON array, read with json_each, so the lookup writes
+            # nothing. CROSS JOIN fixes the loop order: the candidates outside, the primary key
+            # of mods_res (instance first) inside. Left to itself SQLite scans all of mods_res.
+            found.update(self.db.execute(
+                f"SELECT DISTINCT r.type, r.grp, r.inst FROM json_each(?) f CROSS JOIN mods_res r "
+                f"WHERE r.inst = f.value AND r.type IN ({marks})",
+                (json.dumps(chunk), *types)))
+        return [ResourceKey(t, g, i + (1 << 64) if i < 0 else i) for t, g, i in sorted(found)]
+
+    def mods_packages(self, item_types: set[int] | None = None) -> list[ModsPackageInfo]:
+        """Every readable Mods package, in load order. With item_types, also how many resources
+        of those types each holds (one pass over the Mods resources)."""
+        counts: dict[int, int] = {}
+        if item_types:
+            marks = ",".join("?" * len(item_types))
+            counts = dict(self.db.execute(
+                f"SELECT pkg, COUNT(*) FROM mods_res WHERE type IN ({marks}) GROUP BY pkg",
+                tuple(item_types)))
         rows = self.db.execute(
-            f"SELECT DISTINCT r.type, r.grp, r.inst FROM json_each(?) f CROSS JOIN mods_res r "
-            f"WHERE r.inst = f.value AND r.type IN ({marks})",
-            (json.dumps(sorted(_s64(i) for i in instances)), *types))
+            "SELECT id, path, rel, load_order, size, mtime_ns, resources FROM packages "
+            "WHERE source=? AND error IS NULL ORDER BY load_order", (MODS,))
+        return [ModsPackageInfo(Path(path), rel, order, size, mtime, resources,
+                                counts.get(pkg, 0))
+                for pkg, path, rel, order, size, mtime, resources in rows]
+
+    def mods_instances(self, types: set[int]):
+        """Every Mods instance of these types (unsigned; repeats possible), streamed."""
+        marks = ",".join("?" * len(types))
+        for (inst,) in self.db.execute(
+                f"SELECT inst FROM mods_res WHERE type IN ({marks})", tuple(types)):
+            yield inst + (1 << 64) if inst < 0 else inst
+
+    def mods_keys_of_types(self, types: set[int]) -> list[ResourceKey]:
+        """Every Mods key of these types (one pass over the Mods resources)."""
+        marks = ",".join("?" * len(types))
+        rows = self.db.execute(
+            f"SELECT DISTINCT type, grp, inst FROM mods_res WHERE type IN ({marks}) "
+            "ORDER BY type, inst, grp", tuple(types))
         return [ResourceKey(t, g, i + (1 << 64) if i < 0 else i) for t, g, i in rows]
+
+    def rel_of(self, path: Path) -> str | None:
+        """A Mods package's path inside Mods, as shown to the user."""
+        row = self.db.execute("SELECT rel FROM packages WHERE path=? AND source=?",
+                              (str(path), MODS)).fetchone()
+        return row[0] if row else None
+
+    def installed_packs(self) -> set[str]:
+        """Packs of the indexed game install ("base", "EP03", ...)."""
+        return {pack for (pack,) in self.db.execute(
+            "SELECT DISTINCT pack FROM packages WHERE source=? AND pack IS NOT NULL", (GAME,))}
 
     def failed_packages(self) -> list[tuple[str, str]]:
         return list(self.db.execute(

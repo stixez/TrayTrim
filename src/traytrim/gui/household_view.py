@@ -2,22 +2,23 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QGuiApplication, QImage
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLineEdit, QMenu, QPushButton,
-                               QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLineEdit, QMenu,
+                               QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
 
 from traytrim import restypes
 from traytrim.gui import icons, theme
-from traytrim.gui.describe import (GROUP_ORDER, THUMB_TYPES, card_caption, display_name,
-                                   item_label, item_subtitle, package_name, plural, usage_summary,
-                                   usage_text)
-from traytrim.gui.report_parts import CcCard, CcList, Hero, Picture, Section
+from traytrim.gui.describe import (THUMB_TYPES, card_caption, display_name, group_refs,
+                                   item_label, item_subtitle, plural, usage_summary, usage_text)
+from traytrim.gui.report_parts import (MAX_CARDS, CcCard, Hero, PagedCcList, Picture, Section,
+                                       first_items, item_menu)
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import Notice, SimChip, label
+from traytrim.gui.widgets import Notice, ShowMore, SimChip, label
 from traytrim.names import ItemName
 from traytrim.plan import Plan, PlannedResource
 from traytrim.resolve import LocatedRef, Summary, ref_label, summarize
@@ -39,6 +40,11 @@ class HouseholdReport:
         return self.contents.kind  # "household", "lot" or "room"
 
 
+PAGE_CARDS = MAX_CARDS  # cards built at a time
+# Pictures kept in memory: ~600 x 248 x 248 px x 4 bytes, about 150 MB.
+MAX_THUMBNAILS = 600
+
+
 class HouseholdView(QWidget):
     """Empty, loading and error states, and the report for one household."""
 
@@ -46,6 +52,8 @@ class HouseholdView(QWidget):
     exclusion_changed = Signal(set)     # TrayRefs left out of the export
     copies_chosen = Signal(object)  # {ResourceKey: package Path, or None for the default}
     export_requested = Signal()
+    export_item_requested = Signal(object, object)  # LocatedRef, ItemName or None
+    thumbnails_wanted = Signal(object, list)  # tray item (64-bit), refs of cards on screen
 
     SORTS = (("category", "Category"), ("size", "Size"), ("name", "Name"))
 
@@ -62,7 +70,7 @@ class HouseholdView(QWidget):
         self._plan_error: tuple[str, object] | None = None  # reason, retry
         self._expanded: set[str] = set()  # notices whose details are open
         self._search: QLineEdit | None = None
-        self._list: CcList | None = None
+        self._list: PagedCcList | None = None
         self._pictures: dict[int, QImage] = {}  # tray item -> its own picture
         self._head: QHBoxLayout | None = None
         self._head_picture: Picture | None = None
@@ -72,8 +80,19 @@ class HouseholdView(QWidget):
         self._cards: dict[int, list[CcCard]] = {}
         self._all_cards: list[CcCard] = []
         self._sections: list[Section] = []
-        self._thumbs: dict[int, QImage] = {}
-        self._thumbs_done = False
+        # Loaded thumbnails, the most recently shown last. Kept across households (going back
+        # to one shows its pictures at once), up to MAX_THUMBNAILS: browsing many households
+        # would otherwise keep every picture ever seen.
+        self._thumbs: OrderedDict[int, QImage] = OrderedDict()
+        # Thumbnails are loaded for the cards on screen (a big lot shows a page at a time):
+        # asked for, and tried (asked and answered, with or without an image).
+        self._thumbs_asked: set[int] = set()
+        self._thumbs_tried: set[int] = set()
+        self._card_limit = PAGE_CARDS  # cards on screen when there are more than a page
+        self._groups: list[tuple[str, list[LocatedRef]]] = []
+        self._matching = 0
+        self._search_timer = QTimer(self, singleShot=True, interval=250)
+        self._search_timer.timeout.connect(self._rebuild)
         self._theme_timer = QTimer(self, singleShot=True, interval=0)
         self._theme_timer.timeout.connect(self._rebuild)
 
@@ -85,6 +104,8 @@ class HouseholdView(QWidget):
         self.stack.addWidget(self.message_page)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
+        # Never sideways: anything too wide wraps or is shortened instead.
+        self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.stack.addWidget(self.scroll)
         self.show_message("Nothing selected",
@@ -130,7 +151,7 @@ class HouseholdView(QWidget):
                        and self._report.item.instance == report.item.instance)
         position = self.scroll.verticalScrollBar().value() if keep_scroll else 0
         if not keep_scroll:
-            self._thumbs_done = False
+            self._card_limit = PAGE_CARDS
             self._query = ""
             self._expanded.clear()
             self._size_rank = None
@@ -138,8 +159,6 @@ class HouseholdView(QWidget):
         self._plan = None
         self._plan_error = None
         self._build()
-        if self._thumbs_done:
-            self.set_thumbnails(report.item.instance, {}, True)
         self.stack.setCurrentWidget(self.scroll)
         self.scroll.verticalScrollBar().setValue(position)
 
@@ -192,26 +211,50 @@ class HouseholdView(QWidget):
         sizes = self._owner_sizes()
         for card in self._all_cards:
             card.set_size(sizes.get(card.ref.ref) if card.included else None)
+        excluded = self._report.excluded
         for section in self._sections:
-            section.set_size(sum(sizes.get(c.ref.ref, 0) for c in section.cards if c.included))
+            section.set_size(sum(sizes.get(x.ref, 0) for x in section.refs
+                                 if x.ref not in excluded))
 
     def set_thumbnails(self, instance: int, images: dict[int, QImage],
-                       finished: bool = True) -> None:
-        """Show loaded thumbnails; once loading has finished, the rest get the placeholder."""
-        if self._report is None or self._report.item.instance != instance:
-            return
+                       tried: set[int]) -> None:
+        """Thumbnails loaded for the instances `tried`; those without one get the
+        placeholder."""
         self._thumbs.update(images)
-        self._thumbs_done = self._thumbs_done or finished
+        self._thumbs_tried |= tried
+        self._forget_old_thumbnails()
+        if self._report is not None:  # whichever household is on screen: it may share them
+            self._show_thumbnails()
+
+    def _show_thumbnails(self) -> None:
         for part, cards in self._cards.items():
+            if part in self._thumbs:
+                self._thumbs.move_to_end(part)  # on screen: the last to be forgotten
             for card in cards:
                 if part in self._thumbs:
                     card.thumb.set_image(self._thumbs[part])
-                elif self._thumbs_done:
+                elif part in self._thumbs_tried:
                     card.thumb.set_missing()
 
-    def thumbnails(self) -> set[int]:
-        """Items whose thumbnail is already loaded."""
-        return set(self._thumbs)
+    def _forget_old_thumbnails(self) -> None:
+        """Drop the least recently shown pictures past MAX_THUMBNAILS, never one on screen. A
+        dropped one is loaded again if its card comes back."""
+        on_screen = set(self._cards)
+        for part in list(self._thumbs):
+            if len(self._thumbs) <= MAX_THUMBNAILS:
+                break
+            if part not in on_screen:
+                del self._thumbs[part]
+                self._thumbs_asked.discard(part)
+                self._thumbs_tried.discard(part)
+
+    def _ask_thumbnails(self) -> None:
+        """Ask for the thumbnails of the cards on screen that nobody asked for yet."""
+        wanted = [cards[0].ref for part, cards in self._cards.items()
+                  if part not in self._thumbs_asked]
+        if wanted and self._report is not None:
+            self._thumbs_asked |= {r.ref.instance for r in wanted}
+            self.thumbnails_wanted.emit(self._report.item.instance, wanted)
 
     def set_names(self, instance: int, names: dict[TrayRef, ItemName]) -> None:
         """Item names read from their packages arrive after the report is shown. Cards take
@@ -219,7 +262,7 @@ class HouseholdView(QWidget):
         self._names.update(names)
         if self._report is None or self._report.item.instance != instance or not names:
             return
-        if self._mode == "list" or self._sort == "name":
+        if self._mode == "list" or self._sort == "name" or self._paged:
             self._rebuild()
             return
         for card in self._all_cards:
@@ -264,20 +307,33 @@ class HouseholdView(QWidget):
 
     def _rebuild(self) -> None:
         """Build the page again (theme, view, sort or names changed), keeping the scroll
-        position, the plan on screen and the search box's focus."""
+        position, the plan on screen and the keyboard focus: the search box (and its cursor),
+        the card or the control that had it, so keyboard users don't lose their place."""
         if self._report is None:
             return
         position = self.scroll.verticalScrollBar().value()
         searching = self._search is not None and self._search.hasFocus()
         cursor = self._search.cursorPosition() if searching else 0
+        focus = self.window().focusWidget()  # also right while the window isn't active
+        page = self.scroll.widget()
+        on_page = focus is not None and page is not None and page.isAncestorOf(focus)
+        focused_ref = focus.ref.ref if on_page and isinstance(focus, CcCard) else None
+        focused_name = focus.accessibleName() if on_page and not focused_ref else ""
         self._build()
         self._apply_plan()
-        if self._thumbs_done:
-            self.set_thumbnails(self._report.item.instance, {}, True)
         self.scroll.verticalScrollBar().setValue(position)
         if searching and self._search is not None:
             self._search.setFocus()
             self._search.setCursorPosition(cursor)
+        elif focused_ref is not None:
+            card = next((c for c in self._all_cards if c.ref.ref == focused_ref), None)
+            if card is not None:
+                card.setFocus()
+        elif focused_name:
+            same = next((w for w in self.scroll.widget().findChildren(QWidget)
+                         if w.accessibleName() == focused_name and w.isVisible()), None)
+            if same is not None:
+                same.setFocus()
 
     # Report
 
@@ -354,8 +410,10 @@ class HouseholdView(QWidget):
         bar.addWidget(self._view_toggle())
         col.addLayout(bar)
         col.addSpacing(SPACE["xs"])
-        hint = ("Click an item to leave it out of the export." if self._mode == "cards"
-                else "Switch to cards to choose what to leave out.")
+        hint = ("Click an item to leave it out of the export, or right-click it to export it on "
+                "its own." if self._mode == "cards"
+                else "Switch to cards to choose what to leave out. Right-click an item to export "
+                "it on its own.")
         col.addWidget(label(f"{self._source_line(summary)} {hint}", "secondary", wrap=True))
         col.addSpacing(SPACE["l"])
 
@@ -385,26 +443,45 @@ class HouseholdView(QWidget):
             col.addWidget(self.no_match)
 
         groups = self._sorted_groups(summary.cc)
+        self._groups = groups
         self._cards, self._all_cards, self._sections = {}, [], []
         if not summary.cc:
             col.addWidget(label(f"This {r.noun} doesn't use any CC from your Mods folder.",
                                 "secondary", wrap=True))
         elif self._mode == "cards":
-            for title, refs in groups:
+            # Up to a page of cards; past that, the search picks what's built (not just shown).
+            shown, full, whole = groups, {}, dict(groups)
+            if self._paged:
+                full = {t: [x for x in refs if self._matches(x)] for t, refs in groups}
+                shown = first_items([(t, refs) for t, refs in full.items() if refs],
+                                    self._card_limit)
+            for title, refs in shown:
                 cards = [CcCard(x, x.ref not in r.excluded, self._names.get(x.ref))
                          for x in refs]
                 for card in cards:
                     card.toggled.connect(self._card_toggled)
+                    card.menu_requested.connect(self._card_menu)
                     self._all_cards.append(card)
                     if card.ref.ref.kind in THUMB_TYPES:
                         self._cards.setdefault(card.ref.ref.instance, []).append(card)
-                        if card.ref.ref.instance in self._thumbs:
-                            card.thumb.set_image(self._thumbs[card.ref.ref.instance])
-                section = Section(title, cards)
+                    else:
+                        card.thumb.set_missing()
+                section = Section(title, cards, refs=whole.get(title))
+                if self._paged:
+                    section.show_matching(len(full[title]))  # "3 of 40", as without pages
                 self._sections.append(section)
                 col.addWidget(section)
+            if self._paged:
+                self._matching = sum(len(refs) for refs in full.values())
+                more = ShowMore(self._matching, self._show_more_cards, PAGE_CARDS)
+                more.set_shown(len(self._all_cards))
+                col.addWidget(more)
+            self._show_thumbnails()
+            self._ask_thumbnails()
         else:
-            self._list = CcList(groups, len(r.sim_ids) > 1, r.excluded, self._names)
+            self._list = PagedCcList(
+                len(r.sim_ids) > 1, r.excluded, self._names,
+                lambda ref: self.export_item_requested.emit(ref, self._names.get(ref.ref)))
             col.addWidget(self._list)
         col.addStretch(1)
         old = self.scroll.takeWidget()
@@ -412,6 +489,20 @@ class HouseholdView(QWidget):
             old.deleteLater()
         self.scroll.setWidget(page)
         self._apply_filter()
+
+    @property
+    def _paged(self) -> bool:
+        """More CC than one page of cards: they're built a page at a time."""
+        return self._report is not None and len(self._summary.cc) > PAGE_CARDS
+
+    def _show_more_cards(self) -> None:
+        first_new = len(self._all_cards)
+        self._card_limit += PAGE_CARDS
+        self._rebuild()
+        if first_new < len(self._all_cards):  # keyboard focus goes to where the list goes on
+            card = self._all_cards[first_new]
+            card.setFocus()
+            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(card, 0, SPACE["xl"]))
 
     # Search and sort
 
@@ -431,7 +522,7 @@ class HouseholdView(QWidget):
             return [("Largest first", ordered)]
         if self._sort == "name":
             return [("A to Z", sorted(refs, key=lambda x: self._title(x).casefold()))]
-        return self._groups(refs, self._title)
+        return group_refs(refs, self._title)
 
     def _matches(self, ref: LocatedRef) -> bool:
         if not self._query.strip():
@@ -444,14 +535,22 @@ class HouseholdView(QWidget):
 
     def _query_changed(self, text: str) -> None:
         self._query = text
-        self._apply_filter()
+        if self._mode == "cards" and self._paged:
+            self._card_limit = PAGE_CARDS
+            self._search_timer.start()  # cards are built for the matches: wait for a pause
+        else:
+            self._apply_filter()
 
     def _apply_filter(self) -> None:
         if self._search is None:
             return
         total = len(self._summary.cc)
-        if self._list is not None:
-            shown = self._list.show_matching(self._matches)
+        if self._list is not None:  # the matches, a page at a time
+            self._list.set_groups([(t, [x for x in refs if self._matches(x)])
+                                   for t, refs in self._groups])
+            shown = self._list.total
+        elif self._paged:  # only matching cards were built
+            shown = self._matching
         else:
             shown = 0
             for section in self._sections:
@@ -501,18 +600,11 @@ class HouseholdView(QWidget):
             packs = s.packs
             where = "the base game" if packs == ["base"] else ", ".join(
                 "base game" if p == "base" else p for p in packs)
-            parts.append(f"{plural(len(s.game), 'item')} come from the game ({where}) and "
-                         "aren't exported.")
+            n = len(s.game)
+            parts.append(f"{plural(n, 'item')} {'comes' if n == 1 else 'come'} from the game "
+                         f"({where}) and {'isn' if n == 1 else 'aren'}'t exported.")
         return " ".join(parts)
 
-    @staticmethod
-    def _groups(refs: list[LocatedRef], title=package_name) -> list[tuple[str, list[LocatedRef]]]:
-        by_group: dict[str, list[LocatedRef]] = {}
-        for ref in refs:
-            by_group.setdefault(ref.ref.group, []).append(ref)
-        order = {g: i for i, g in enumerate(GROUP_ORDER)}
-        return [(g, sorted(rs, key=lambda x: (item_label(x), title(x).casefold())))
-                for g, rs in sorted(by_group.items(), key=lambda kv: order.get(kv[0], 99))]
 
     # Notices
 
@@ -752,6 +844,9 @@ class HouseholdView(QWidget):
                 sender.blockSignals(False)
             return
         self.sims_changed.emit(chosen)
+
+    def _card_menu(self, card: CcCard, pos) -> None:
+        item_menu(self, pos, lambda: self.export_item_requested.emit(card.ref, card.name))
 
     def _card_toggled(self, ref: TrayRef, included: bool) -> None:
         r = self._report

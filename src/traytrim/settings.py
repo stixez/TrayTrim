@@ -10,7 +10,8 @@ from pathlib import Path
 from traytrim.paths import config_dir
 
 THEMES = ("system", "light", "dark")
-TRAY_KINDS = ("household", "lot", "room")
+TRAY_KINDS = ("household", "lot", "room", "mods")
+MODS_SORTS = ("name", "size")
 
 
 @dataclass
@@ -20,7 +21,8 @@ class Settings:
     output_dir: str | None = None   # last folder exports went to
     theme: str = "system"           # "system", "light" or "dark"
     window_geometry: str | None = None
-    tray_kind: str = "household"    # which kind of tray item the gallery shows
+    tray_kind: str = "household"    # which kind of tray item the gallery shows, or "mods"
+    mods_sort: str = "name"         # the Mods list: "name" (load order) or "size" (largest first)
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
@@ -36,7 +38,8 @@ class Settings:
         # stop the app from starting.
         for f in fields(cls):
             value = data.get(f.name)
-            allowed = {"theme": THEMES, "tray_kind": TRAY_KINDS}.get(f.name)
+            allowed = {"theme": THEMES, "tray_kind": TRAY_KINDS,
+                       "mods_sort": MODS_SORTS}.get(f.name)
             if isinstance(value, str) and (allowed is None or value in allowed):
                 setattr(settings, f.name, value)
         return settings

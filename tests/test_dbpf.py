@@ -308,3 +308,12 @@ def test_entries_without_an_index_are_rejected(tmp_path):
         Package(path)
     with pytest.raises(DbpfError, match="damaged index"):
         dbpf.scan_index(path)
+
+
+def test_a_resource_claiming_to_unpack_huge_is_refused(tmp_path):
+    path = tmp_path / "bomb.package"
+    key = ResourceKey(0x034AEECB, 0, 1)
+    with PackageWriter(path) as w:
+        w.add_raw(key, zlib.compress(b"\0" * 1000), dbpf.COMP_ZLIB, dbpf.MAX_RESOURCE_SIZE + 1)
+    with dbpf.Package(path) as pkg, pytest.raises(dbpf.DbpfError, match="more than any Sims 4"):
+        pkg.read(pkg.find(key))

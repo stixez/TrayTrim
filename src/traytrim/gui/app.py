@@ -14,6 +14,8 @@ from PySide6.QtWidgets import QApplication
 
 from traytrim.gui import icons, tasks, theme
 from traytrim.gui.main_window import MainWindow
+from traytrim.gui.widgets import PlainToolTips
+from traytrim.received import remove_stale_temp
 from traytrim.settings import THEMES, Settings
 
 _SCHEMES = {
@@ -63,6 +65,8 @@ def create_app(argv: list[str] | None = None) -> QApplication:
     theme.load_fonts()
     app.setFont(theme.ui_font())
     app.styleHints().colorSchemeChanged.connect(lambda _scheme: apply_current_scheme(app))
+    if not app.findChildren(PlainToolTips):
+        app.installEventFilter(PlainToolTips(app))
     return app
 
 
@@ -81,6 +85,7 @@ def run(theme_override: str | None = None) -> int:
     app = create_app()
     settings = Settings.load()
     set_theme(app, theme_override if theme_override in THEMES else settings.theme)
+    tasks.run_in_background(remove_stale_temp, lambda _n: None, lambda _e: None)
     window = MainWindow(settings)
     window.show()
     if os.environ.get("TRAYTRIM_SMOKE_TEST"):

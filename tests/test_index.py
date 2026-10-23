@@ -227,3 +227,13 @@ def test_human_sizes():
     assert human_size(5_320_000_000) == "4.95 GB"
     assert percent_smaller(32, 5000) == "99.4% smaller"
     assert percent_smaller(5000, 32) is None
+
+
+def test_a_package_that_stays_broken_isnt_a_change(tmp_path):
+    mods = tmp_path / "Mods"
+    mods.mkdir()
+    (mods / "broken.package").write_bytes(b"not a package at all")
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        assert ix.update(mods, None).changed
+        again = ix.update(mods, None)
+        assert not again.changed and again.failed  # read again, still broken, nothing new

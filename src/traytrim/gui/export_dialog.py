@@ -9,13 +9,14 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QDialog, QFileDialog, QGridLayout, QHBoxLayout, QLineEdit,
                                QProgressBar, QPushButton, QStackedWidget, QVBoxLayout, QWidget)
 
-from traytrim.export import (ExportOptions, ExportResult, export_household, forbidden_reason,
-                             safe_name)
+from traytrim.export import (ExportOptions, ExportResult, export_household, export_item,
+                             forbidden_reason, safe_name)
 from traytrim.gui import system
 from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import ElidedLabel, IconLabel, Notice, SimChip, label, link_button
+from traytrim.gui.widgets import (ElidedLabel, IconLabel, Notice, SimChip, SupportLine, label,
+                                  link_button)
 from traytrim.index import ResourceIndex
 from traytrim.plan import Plan
 from traytrim.resolve import GameplayMod, LocatedRef
@@ -29,8 +30,8 @@ STEPS = {"package": "Copying the CC into one package", "verify": "Checking the e
 
 @dataclass
 class ExportRequest:
-    item: TrayItem
-    contents: HouseholdContents
+    item: TrayItem | None            # None: one CC item on its own (refs holds it)
+    contents: HouseholdContents | None
     refs: list[LocatedRef]
     plan: Plan
     gameplay: list[GameplayMod]
@@ -38,6 +39,7 @@ class ExportRequest:
     base_name: str
     user_dir: Path | None
     game_dir: Path | None = None
+    item_name: str = ""              # the CC item's name, when exporting one on its own
 
 
 class ExportDialog(QDialog):
@@ -67,22 +69,10 @@ class ExportDialog(QDialog):
         col = QVBoxLayout(page)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(SPACE["s"])
-        noun = r.contents.kind
-        names = [s.sim.name for s in r.contents.sims if s.sim.sim_id in r.sim_ids]
-        if noun != "household":
-            who, users = r.item.name or noun, f"this {noun} uses"
-        else:
-            who = names[0] if len(names) == 1 else r.item.name or "household"
-            users = "this Sim uses" if len(names) == 1 else "these Sims use"
-        col.addWidget(label(f"Export {who}", "title", wrap=True))
-        col.addWidget(label(
-            f"A {human_size(r.plan.export_size)} package with only the CC {users}, plus the "
-            "tray files, in one zip. Every file is checked against its source afterwards.",
-            "secondary", wrap=True))
-        if noun == "household" and len(names) < len(r.contents.sims):
-            col.addWidget(label(
-                "The tray files always hold the whole household; CC is only included for the "
-                "Sims you picked.", "secondary", wrap=True))
+        noun = r.contents.kind if r.contents is not None else "item"
+        names = ([s.sim.name for s in r.contents.sims if s.sim.sim_id in r.sim_ids]
+                 if r.contents is not None else [])
+        self._intro(col, noun, names)
         col.addSpacing(SPACE["l"])
 
         grid = QGridLayout()
@@ -118,6 +108,9 @@ class ExportDialog(QDialog):
         kit_row.addWidget(self.kit_chip)
         kit_row.addStretch(1)
         col.addLayout(kit_row)
+        if r.item is None:
+            self.kit_chip.setChecked(False)
+            self.kit_chip.hide()
 
         col.addSpacing(SPACE["s"])
         if r.gameplay:
@@ -157,6 +150,32 @@ class ExportDialog(QDialog):
         col.addSpacing(SPACE["m"])
         col.addLayout(buttons)
         return page
+
+    def _intro(self, col: QVBoxLayout, noun: str, names: list[str]) -> None:
+        r = self.request
+        size = human_size(r.plan.export_size)
+        if r.item is None:
+            col.addWidget(label(f"Export {r.item_name}", "title", wrap=True))
+            col.addWidget(label(
+                f"A {size} package with this item and everything it needs: "
+                f"{plural(len(r.plan.resources), 'file')} from "
+                f"{plural(len(r.plan.source_packages), 'CC package')}. It goes straight into "
+                "Mods; there are no tray files. Every file is checked against its source "
+                "afterwards.", "secondary", wrap=True))
+            return
+        if noun != "household":
+            who, users = r.item.name or noun, f"this {noun} uses"
+        else:
+            who = names[0] if len(names) == 1 else r.item.name or "household"
+            users = "this Sim uses" if len(names) == 1 else "these Sims use"
+        col.addWidget(label(f"Export {who}", "title", wrap=True))
+        col.addWidget(label(
+            f"A {size} package with only the CC {users}, plus the tray files, in one zip. "
+            "Every file is checked against its source afterwards.", "secondary", wrap=True))
+        if noun == "household" and len(names) < len(r.contents.sims):
+            col.addWidget(label(
+                "The tray files always hold the whole household; CC is only included for the "
+                "Sims you picked.", "secondary", wrap=True))
 
     def _progress_page(self) -> QWidget:
         page = QWidget()
@@ -226,6 +245,9 @@ class ExportDialog(QDialog):
                 f"The in-game test kit is in {result.test_kit.name}, next to the zip. Its "
                 "HOW_TO_TEST.txt has the steps.", "secondary", wrap=True))
         col.addStretch(1)
+        if ok:
+            col.addWidget(SupportLine())
+            col.addSpacing(SPACE["s"])
         buttons = QHBoxLayout()
         if result.test_kit:
             steps = QPushButton("Open test steps")
@@ -243,6 +265,7 @@ class ExportDialog(QDialog):
         col.addSpacing(SPACE["m"])
         col.addLayout(buttons)
         self.pages.setCurrentWidget(self.result_page)
+        done.setFocus()  # Enter closes it; no focus ring on a link the user didn't choose
 
     def showEvent(self, event) -> None:  # noqa: N802
         super().showEvent(event)
@@ -273,10 +296,15 @@ class ExportDialog(QDialog):
                                 r.game_dir)
 
         def work(task: BackgroundTask) -> ExportResult:
+            def report(step, done, total):
+                task.report(step, done, total)
+
             with ResourceIndex() as ix:
-                return export_household(
-                    r.item, r.contents, r.refs, r.plan, r.gameplay, r.sim_ids, options, ix,
-                    lambda step, done, total: task.report(step, done, total), task.cancelled)
+                if r.item is None:
+                    return export_item(r.refs[0], r.item_name, r.plan, options, ix, report,
+                                       task.cancelled)
+                return export_household(r.item, r.contents, r.refs, r.plan, r.gameplay,
+                                        r.sim_ids, options, ix, report, task.cancelled)
 
         self.step_label.setText(STEPS["package"])
         self.bar.setRange(0, 0)

@@ -24,6 +24,11 @@ def open_path(path: Path) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
+def open_url(url: str) -> None:
+    """A web page in the default browser."""
+    QDesktopServices.openUrl(QUrl(url))
+
+
 def desktop() -> Path:
     location = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DesktopLocation)
     return Path(location) if location else Path.home()

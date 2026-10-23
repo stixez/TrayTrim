@@ -91,3 +91,13 @@ def category_icon(ref: LocatedRef) -> str:
 
 def plural(n: int, one: str, many: str | None = None) -> str:
     return f"{n:,} {one if n == 1 else (many or one + 's')}"
+
+
+def group_refs(refs: list[LocatedRef], title=package_name) -> list[tuple[str, list[LocatedRef]]]:
+    """CC items in sections, in CAS order (GROUP_ORDER), each sorted by label then `title`."""
+    by_group: dict[str, list[LocatedRef]] = {}
+    for ref in refs:
+        by_group.setdefault(ref.ref.group, []).append(ref)
+    order = {g: i for i, g in enumerate(GROUP_ORDER)}
+    return [(g, sorted(rs, key=lambda x: (item_label(x), title(x).casefold())))
+            for g, rs in sorted(by_group.items(), key=lambda kv: order.get(kv[0], 99))]
