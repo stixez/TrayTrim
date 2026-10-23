@@ -15,8 +15,8 @@ from traytrim.gui import system
 from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import (ElidedLabel, IconLabel, Notice, SimChip, SupportLine, label,
-                                  link_button)
+from traytrim.gui.widgets import (ElidedLabel, IconLabel, Notice, SimChip, Spinner, SupportLine,
+                                  label, link_button)
 from traytrim.index import ResourceIndex
 from traytrim.plan import Plan
 from traytrim.resolve import GameplayMod, LocatedRef
@@ -24,7 +24,7 @@ from traytrim.settings import Settings
 from traytrim.tray import HouseholdContents, TrayItem
 from traytrim.units import human_size
 
-STEPS = {"package": "Copying the CC into one package", "verify": "Checking the export",
+STEPS = {"package": "Copying the CC into its packages", "verify": "Checking the export",
           "zip": "Zipping"}
 
 
@@ -102,7 +102,7 @@ class ExportDialog(QDialog):
         self.kit_chip = SimChip("Also make an in-game test kit")
         self.kit_chip.setChecked(True)
         self.kit_chip.setAccessibleName("Also make an in-game test kit")
-        self.kit_chip.setToolTip("A folder with only the exported package and steps to try the "
+        self.kit_chip.setToolTip("A folder with only the exported packages and steps to try the "
                                  f"{noun} in your game with nothing else installed.")
         kit_row = QHBoxLayout()
         kit_row.addWidget(self.kit_chip)
@@ -157,7 +157,7 @@ class ExportDialog(QDialog):
         if r.item is None:
             col.addWidget(label(f"Export {r.item_name}", "title", wrap=True))
             col.addWidget(label(
-                f"A {size} package with this item and everything it needs: "
+                f"{size} with this item and everything it needs: "
                 f"{plural(len(r.plan.resources), 'file')} from "
                 f"{plural(len(r.plan.source_packages), 'CC package')}. It goes straight into "
                 "Mods; there are no tray files. Every file is checked against its source "
@@ -170,8 +170,9 @@ class ExportDialog(QDialog):
             users = "this Sim uses" if len(names) == 1 else "these Sims use"
         col.addWidget(label(f"Export {who}", "title", wrap=True))
         col.addWidget(label(
-            f"A {size} package with only the CC {users}, plus the tray files, in one zip. "
-            "Every file is checked against its source afterwards.", "secondary", wrap=True))
+            f"{size} with only the CC {users}, a package per CC item named after it, plus "
+            "the tray files, in one zip. Every file is checked against its source afterwards.",
+            "secondary", wrap=True))
         if noun == "household" and len(names) < len(r.contents.sims):
             col.addWidget(label(
                 "The tray files always hold the whole household; CC is only included for the "
@@ -182,7 +183,11 @@ class ExportDialog(QDialog):
         col = QVBoxLayout(page)
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(SPACE["s"])
-        col.addWidget(label("Exporting", "title"))
+        head = QHBoxLayout()
+        head.setSpacing(SPACE["m"])
+        head.addWidget(Spinner(28), 0, Qt.AlignmentFlag.AlignVCenter)
+        head.addWidget(label("Exporting", "title"), 1, Qt.AlignmentFlag.AlignVCenter)
+        col.addLayout(head)
         self.step_label = label("", "secondary", wrap=True)
         col.addWidget(self.step_label)
         col.addSpacing(SPACE["s"])
@@ -218,7 +223,8 @@ class ExportDialog(QDialog):
         head.addWidget(label("Export verified" if ok else "Export saved, but a check failed",
                              "title"), 1)
         col.addLayout(head)
-        col.addWidget(label(f"{result.zip_path.name}, {human_size(result.zip_size)}",
+        col.addWidget(label(f"{result.zip_path.name}, {human_size(result.zip_size)}, with "
+                            f"{plural(len(result.packages), 'package')}, one per CC item",
                             "secondary", wrap=True))
         col.addSpacing(SPACE["m"])
         for check in result.verification.checks:
@@ -234,8 +240,7 @@ class ExportDialog(QDialog):
             for problem in check.problems[:8]:
                 text.addWidget(label(problem, "caption", wrap=True))
             if len(check.problems) > 8:
-                text.addWidget(label(f"and {len(check.problems) - 8} more in report.json",
-                                     "caption"))
+                text.addWidget(label(f"and {len(check.problems) - 8} more", "caption"))
             row.addLayout(text, 1)
             col.addLayout(row)
             col.addSpacing(SPACE["xs"])

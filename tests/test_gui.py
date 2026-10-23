@@ -544,3 +544,87 @@ def test_a_paged_list_counts_whole_sections(app):
     paged.set_groups([("Objects", refs)])
     assert paged.list.topLevelItem(0).text(0) == f"Objects ({PAGE_ROWS + 10:,})"
     paged.deleteLater()
+
+
+def test_include_all_and_leave_all_out(app, tmp_path):
+    from test_plan import located, world
+    from traytrim.gui.household_view import HouseholdReport, HouseholdView
+    from traytrim.names import ItemName
+    from traytrim.tray import HouseholdContents, RefKind, SimContents
+
+    gen = world.__wrapped__(tmp_path)
+    index, k = next(gen)
+    refs = [located(index, RefKind.CAS_PART, k["hair"]),
+            located(index, RefKind.CAS_PART, k["recolor"])]
+    contents = HouseholdContents("Moreau", [SimContents(TraySim(1, "Camille", "Moreau"))], 2)
+    view = HouseholdView()
+    sent = []
+    view.exclusion_changed.connect(sent.append)
+    view.show_report(HouseholdReport(TrayItem(5, 1, "Moreau"), contents, refs, {1}))
+    view.set_names(5, {refs[0].ref: ItemName("Long Waves", "Me", "Me_yfHair_LongWaves")})
+    buttons = {b.text(): b for b in view.scroll.widget().findChildren(QPushButton)}
+
+    buttons["Leave all out"].click()
+    assert sent[-1] == {r.ref for r in refs}
+    assert not any(c.included for c in view._all_cards)
+    assert view.excluded_label.text() == "2 left out"
+    buttons["Include all"].click()
+    assert sent[-1] == set() and all(c.included for c in view._all_cards)
+
+    # While searching, only the matches.
+    view._search.setText("waves")
+    buttons["Leave all out"].click()
+    assert sent[-1] == {refs[0].ref}
+    assert [c.included for c in view._all_cards] == [False, True]
+    count = len(sent)
+    buttons["Leave all out"].click()  # nothing changes: nothing is sent
+    assert len(sent) == count
+
+    # The list shows what's left out as it's built: it's built again.
+    view._search.setText("")
+    view._set_mode("list")
+    buttons = {b.text(): b for b in view.scroll.widget().findChildren(QPushButton)}
+    buttons["Include all"].click()
+    assert sent[-1] == set() and view._list is not None
+    buttons = {b.text(): b for b in view.scroll.widget().findChildren(QPushButton)}
+    buttons["Leave all out"].click()
+    assert sent[-1] == {r.ref for r in refs} and view._list._excluded == sent[-1]
+    view.deleteLater()
+    next(gen, None)
+
+
+def test_waiting_shows_a_loader(app):
+    from traytrim.gui.household_view import HouseholdView
+    from traytrim.gui.package_view import PackageView
+
+    view = HouseholdView()
+    view.show_message("Seaside", "Reading its objects and build items.", loading=True)
+    assert view.message_page.spinner.isVisibleTo(view)
+    view.show_message("Nothing selected", "Pick a household.")
+    assert not view.message_page.spinner.isVisibleTo(view)
+    packages = PackageView()
+    packages.show_progress("Working out what uses it", "Reading: 3 of 10 packages.", 3, 10)
+    panel = packages.message_page
+    assert panel.spinner.isVisibleTo(packages) and panel.bar.isVisibleTo(packages)
+    assert panel.bar.value() == 3 and panel.bar.maximum() == 10
+    packages.clear_progress()
+    assert not panel.spinner.isVisibleTo(packages)
+    view.deleteLater()
+    packages.deleteLater()
+
+
+def test_the_window_always_offers_buy_me_a_coffee(app, tmp_path, monkeypatch):
+    from traytrim import SUPPORT_URL
+    from traytrim.gui import main_window, system
+
+    opened = []
+    monkeypatch.setattr(system, "open_url", opened.append)
+    monkeypatch.setattr(main_window.paths, "resolve_folders",
+                        lambda *_a: main_window.paths.Sims4Folders(None, None))
+    win = main_window.MainWindow(Settings())
+    [link] = [b for b in win.statusBar().findChildren(QPushButton)
+              if b.text() == "Buy me a coffee"]
+    link.click()
+    assert opened == [SUPPORT_URL]
+    assert win._check_updates is False  # tests never ask GitHub
+    win.deleteLater()

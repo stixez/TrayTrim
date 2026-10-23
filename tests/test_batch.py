@@ -9,10 +9,11 @@ import pytest
 
 from test_build import (CHAIR, EA_SOFA, LAMP, WALL, items_by_kind, tray_dir,  # noqa: F401
                         write)
-from traytrim import restypes
+from traytrim import dbpf, restypes
 from traytrim.batch import Choice, export_many, export_together, prepare
 from traytrim.dbpf import ResourceKey
 from traytrim.export import ExportOptions
+from traytrim.verify import read_zip_comment
 from traytrim.index import ResourceIndex
 from traytrim.tray import RefKind, TrayRef
 from traytrim.verify import check_zip
@@ -94,18 +95,28 @@ def test_check_zip_finds_damage_and_changes(tmp_path, index, tray_dir):  # noqa:
     [outcome] = export_many([lot], ExportOptions(tmp_path / "out", "", False), index)
     good = outcome.result.zip_path
     assert check_zip(good).ok
+    with zipfile.ZipFile(good) as z:
+        assert "report.json" not in z.namelist()
 
-    # A report that no longer matches the package
-    changed = tmp_path / "changed.zip"
-    with zipfile.ZipFile(good) as src, zipfile.ZipFile(changed, "w") as dst:
-        for info in src.infolist():
-            data = src.read(info)
-            if info.filename == "report.json":
-                report = json.loads(data)
-                report["files"] = report["files"][1:]
-                data = json.dumps(report).encode()
-            dst.writestr(info, data)
-    result = check_zip(changed)
+    # An export from before report.json was dropped is still checked against it, and one
+    # whose report no longer matches its package fails that check.
+    files = []
+    with zipfile.ZipFile(good) as z:
+        for name in z.namelist():
+            if name.endswith(".package"):
+                z.extract(name, tmp_path / "x")
+                with dbpf.Package(tmp_path / "x" / name) as pkg:
+                    files += [{"key": str(e.key), "bytes": e.file_size} for e in pkg]
+
+    def with_report(path, listed):
+        with zipfile.ZipFile(good) as src, zipfile.ZipFile(path, "w") as dst:
+            for info in src.infolist():
+                dst.writestr(info, src.read(info))
+            dst.writestr("report.json", json.dumps({"files": listed}))
+        return path
+
+    assert check_zip(with_report(tmp_path / "old.zip", files)).ok
+    result = check_zip(with_report(tmp_path / "changed.zip", files[1:]))
     assert [c.name for c in result.checks if not c.passed] == ["It matches its report"]
 
     # Flipped bytes inside the stored package
@@ -126,7 +137,7 @@ def test_check_zip_reports_damaged_compressed_files_and_foreign_zips(tmp_path, i
     [outcome] = export_many([lot], ExportOptions(tmp_path / "out", "", False), index)
     good = outcome.result.zip_path
     with zipfile.ZipFile(good) as z:
-        info = z.getinfo("report.json")
+        info = z.getinfo("README.txt")
         assert info.compress_type == zipfile.ZIP_DEFLATED
         start = info.header_offset + 30 + len(info.filename.encode()) + len(info.extra)
     data = bytearray(good.read_bytes())
@@ -136,7 +147,7 @@ def test_check_zip_reports_damaged_compressed_files_and_foreign_zips(tmp_path, i
     broken.write_bytes(bytes(data))
     result = check_zip(broken)  # must not raise zlib.error
     assert result.checks[0].name == "The zip is intact" and not result.checks[0].passed
-    assert any("report.json" in p for p in result.checks[0].problems)
+    assert any("README.txt" in p for p in result.checks[0].problems)
 
     foreign = tmp_path / "photos.zip"
     with zipfile.ZipFile(foreign, "w") as z:
@@ -145,7 +156,7 @@ def test_check_zip_reports_damaged_compressed_files_and_foreign_zips(tmp_path, i
     assert only.name == "It's a TrayTrim export" and not only.passed
 
 
-def test_export_together_shares_one_package(tmp_path, index, tray_dir):  # noqa: F811
+def test_export_together_shares_the_packages(tmp_path, index, tray_dir):  # noqa: F811
     items = items_by_kind(tray_dir)
     lot, room = items["lot"], items["room"]
     chair = TrayRef(RefKind.OBJECT, CHAIR)
@@ -155,16 +166,21 @@ def test_export_together_shares_one_package(tmp_path, index, tray_dir):  # noqa:
     assert result.verification.ok and result.zip_path.name == "Seaside_and_Nursery_TrayTrim.zip"
     with zipfile.ZipFile(result.zip_path) as z:
         names = z.namelist()
-        report = json.loads(z.read("report.json"))
+        meta = read_zip_comment(z.comment)
         readme = z.read("README.txt").decode()
-    assert sum(n.endswith(".package") for n in names) == 1
+        z.extractall(tmp_path / "x")
+    packages = [n for n in names if n.endswith(".package")]
+    assert len(packages) == len(result.packages) > 1  # one per CC item
     assert {n for n in names if n.startswith("Tray/")} == {
         f"Tray/{f.name}" for f in lot.files + room.files}
-    assert report["kind"] == "bundle" and [i["kind"] for i in report["items"]] == ["lot", "room"]
-    keys = [f["key"] for f in report["files"]]
+    assert meta["kind"] == "bundle" and meta["name"] == "Seaside and Nursery"
+    keys = []
+    for name in packages:
+        with dbpf.Package(tmp_path / "x" / name) as pkg:
+            keys += [e.key for e in pkg]
     assert len(keys) == len(set(keys))  # the chair both use is in it once
-    assert any(f"{restypes.OBJECT_DEFINITION:08X}" in k and f"{CHAIR:016X}" in k for k in keys)
-    assert "Lot: Seaside" in readme and "Room: Nursery" in readme
+    assert ResourceKey(restypes.OBJECT_DEFINITION, 0, CHAIR) in keys
+    assert readme.startswith("How to install Seaside and Nursery")
     assert check_zip(result.zip_path).ok
 
 

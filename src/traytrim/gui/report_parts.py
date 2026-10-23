@@ -14,7 +14,9 @@ from traytrim.gui.describe import (THUMB_TYPES, card_caption, category_icon, dis
                                    item_label, plural, usage_summary, usage_text)
 from traytrim.gui.flow import FlowLayout
 from traytrim.gui.theme import RADIUS, SPACE
-from traytrim.gui.widgets import ClampedText, IconLabel, ShowMore, label, link_button, set_role
+from traytrim.gui.widgets import (ClampedText, IconLabel, LoadingPanel, ShowMore, Spinner, label,
+                                  link_button, set_role)
+from traytrim.export import package_groups
 from traytrim.names import ItemName
 from traytrim.plan import Plan
 from traytrim.resolve import LocatedRef
@@ -220,6 +222,13 @@ class CcCard(QFrame):
         self._set_tooltip()
         self.toggled.emit(self.ref.ref, self._included)
 
+    def set_included(self, included: bool) -> None:
+        """Change the state without telling anyone (Include all and Leave all out do)."""
+        if included != self._included:
+            self._included = included
+            self._apply()
+            self._set_tooltip()
+
     def _activate(self) -> None:
         if self.mode == self.TOGGLE:
             self.toggle()
@@ -310,6 +319,9 @@ class Hero(QWidget):
         row = QHBoxLayout()
         row.setSpacing(SPACE["m"])
         self.saving = label("", "saving")
+        self.spinner = Spinner(28)
+        self.spinner.hide()
+        row.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.number, 0, Qt.AlignmentFlag.AlignBaseline)
         row.addWidget(self.saving, 0, Qt.AlignmentFlag.AlignBaseline)
         row.addStretch(1)
@@ -318,7 +330,7 @@ class Hero(QWidget):
         self.export_button.setIcon(icons.icon("export", theme.current().on_accent, 18))
         self.export_button.setIconSize(QSize(18, 18))
         self.export_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.export_button.setToolTip("Save the package and tray files as one zip (Ctrl+E)")
+        self.export_button.setToolTip("Save the CC, a package per item, and the tray files as one zip (Ctrl+E)")
         self.export_button.clicked.connect(on_export)
         self.export_button.setEnabled(False)
         row.addWidget(self.export_button, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -338,6 +350,7 @@ class Hero(QWidget):
             self._retry.hide()
         self.number.setText("Working out the export")
         set_role(self.number, "heroPending")
+        self.spinner.show()
         self.saving.setText("")
         if total:
             self.bar.setRange(0, total)
@@ -352,6 +365,7 @@ class Hero(QWidget):
     def show_error(self, reason: str, on_retry) -> None:
         self.export_button.setEnabled(False)
         self.bar.hide()
+        self.spinner.hide()
         set_role(self.number, "heroPending")
         self.number.setText("Couldn't work out the export")
         self.saving.setText("")
@@ -365,6 +379,7 @@ class Hero(QWidget):
 
     def show_plan(self, plan: Plan) -> None:
         self.bar.hide()
+        self.spinner.hide()
         if self._retry is not None:
             self._retry.hide()
         set_role(self.number, "hero")
@@ -379,8 +394,10 @@ class Hero(QWidget):
         self.number.setText(human_size(size))
         self.saving.setText(percent_smaller(size, whole) or "")
         n_whole = len(plan.packages_with_copies)
+        n_packages = len(package_groups(plan))
         self.line.setText(
-            f"One package with {plural(len(plan.resources), 'file')} taken from "
+            f"{plural(n_packages, 'package')}, one per CC item, with "
+            f"{plural(len(plan.resources), 'file')} taken from "
             f"{plural(len(plan.source_packages), 'CC package')}. Copying "
             f"{'the' if n_whole > 1 else 'that'} {plural(n_whole, 'whole package')} instead "
             f"would take {human_size(whole)}.")
@@ -490,6 +507,9 @@ class Verdict(QWidget):
         row = QHBoxLayout()
         row.setSpacing(SPACE["m"])
         self.text = label("", "hero", wrap=True)
+        self.spinner = Spinner(28)
+        self.spinner.hide()
+        row.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignVCenter)
         row.addWidget(self.text, 1, Qt.AlignmentFlag.AlignVCenter)
         self.button: QPushButton | None = None
         if button_text:
@@ -520,6 +540,7 @@ class Verdict(QWidget):
         self.bar.setValue(done)
         self.bar.setAccessibleName(text)
         self.bar.show()
+        self.spinner.show()
 
     def set_result(self, text: str, line: str = "") -> None:
         set_role(self.text, "hero")
@@ -527,6 +548,7 @@ class Verdict(QWidget):
         self.line.setText(line)
         self.line.setVisible(bool(line))
         self.bar.hide()
+        self.spinner.hide()
 
 
 class NoticeStack(QWidget):
@@ -564,29 +586,9 @@ class ReportPage(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
-        page = QWidget()
-        page.setObjectName("content")
-        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        col = QVBoxLayout(page)
-        col.setContentsMargins(SPACE["xxl"], SPACE["xxl"], SPACE["xxl"], SPACE["xxl"])
-        col.addStretch(2)
-        box = QWidget()
-        box.setFixedWidth(440)  # a fixed width lets wrapped labels report the right height
-        inner = QVBoxLayout(box)
-        inner.setContentsMargins(0, 0, 0, 0)
-        inner.setSpacing(SPACE["s"])
-        self.message_title = label("", "headline", wrap=True)
-        self.message_body = label("", "secondary", wrap=True)
-        inner.addWidget(self.message_title)
-        inner.addWidget(self.message_body)
-        centred = QHBoxLayout()
-        centred.addStretch(1)
-        centred.addWidget(box)
-        centred.addStretch(1)
-        col.addLayout(centred)
-        col.addStretch(3)
-        self.message_page = page
-        self.stack.addWidget(page)
+        self.message_page = LoadingPanel()
+        self.message_title, self.message_body = self.message_page.title, self.message_page.body
+        self.stack.addWidget(self.message_page)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         # Never sideways: anything too wide wraps or is shortened instead.
@@ -594,10 +596,10 @@ class ReportPage(QWidget):
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.stack.addWidget(self.scroll)
 
-    def show_message(self, title: str, body: str = "") -> None:
-        self.message_title.setText(title)
-        self.message_body.setText(body)
-        self.message_body.setVisible(bool(body))
+    def show_message(self, title: str, body: str = "", loading: bool = False, done: int = 0,
+                     total: int = 0) -> None:
+        """loading: a loader screen, with a spinner (and a bar when `total` is known)."""
+        self.message_page.set_state(title, body, loading, done, total)
         self.stack.setCurrentWidget(self.message_page)
 
     def new_page(self) -> QVBoxLayout:

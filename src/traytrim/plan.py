@@ -28,7 +28,7 @@ from traytrim import dbpf, restypes
 from traytrim.dbpf import ResourceKey
 from traytrim.index import ModsHit, ResourceIndex
 from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, LEAF_TYPES, ReferenceParseError,
-                                 large_values, references)
+                                 large_values, references, scan_candidates)
 from traytrim.resolve import LocatedRef, Where
 from traytrim.tray import RefKind, TrayRef
 
@@ -108,6 +108,7 @@ class _Packages:
     def __init__(self, limit: int = 64):
         self._open: OrderedDict[Path, dbpf.Package] = OrderedDict()
         self._keys: dict[Path, dict[int, list[ResourceKey]]] = {}
+        self._candidates: dict[Path, set[int]] = {}
         self._limit = limit
 
     def get(self, path: Path) -> dbpf.Package:
@@ -128,6 +129,12 @@ class _Packages:
     def keys(self, path: Path) -> dict[int, list[ResourceKey]]:
         self.get(path)
         return self._keys[path]
+
+    def candidates(self, path: Path) -> set[int]:
+        """scan_candidates of the package, worked out once."""
+        if path not in self._candidates:
+            self._candidates[path] = scan_candidates(self.keys(path))
+        return self._candidates[path]
 
     def read(self, hit: ModsHit) -> bytes:
         return self.get(hit.path).read(hit.entry)
@@ -224,7 +231,8 @@ def build_plan(refs: list[LocatedRef], index: ResourceIndex,
                 continue
             try:
                 data = packages.read(item.copy)
-                found = references(key, data, packages.keys(item.copy.path))
+                found = references(key, data, packages.keys(item.copy.path),
+                                   packages.candidates(item.copy.path))
             except (dbpf.DbpfError, ReferenceParseError, OSError) as e:
                 plan.unreadable.append((key, item.copy.path, str(e)))
                 continue

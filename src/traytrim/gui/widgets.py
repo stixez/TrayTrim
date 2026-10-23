@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import html
+import math
 import re
 
-from PySide6.QtCore import QEvent, QObject, QRectF, QSize, Qt
+from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QGridLayout, QHBoxLayout,
-                               QLabel, QPushButton, QSizePolicy, QToolTip, QVBoxLayout, QWidget)
+                               QLabel, QProgressBar, QPushButton, QSizePolicy, QToolTip,
+                               QVBoxLayout, QWidget)
 
 from traytrim import SUPPORT_URL
 from traytrim.gui import icons, system, theme
@@ -412,3 +414,103 @@ class SupportLine(QWidget):
         link.clicked.connect(lambda: system.open_url(SUPPORT_URL))
         row.addWidget(link)
         row.addStretch(1)
+
+
+class Spinner(QWidget):
+    """Something is being worked on: an arc that turns and grows and shrinks, on a faint ring.
+    It only animates while it's shown, so hidden spinners cost nothing."""
+
+    _FRAME_MS = 16          # about 60 frames a second
+    _TURN_MS = 1100         # one turn of the ring
+    _BREATH_MS = 1600       # the arc grows and shrinks once in this time
+
+    def __init__(self, size: int = 32, parent=None):
+        super().__init__(parent)
+        self._size = size
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._clock = QElapsedTimer()
+        self._timer = QTimer(self, interval=self._FRAME_MS)
+        self._timer.timeout.connect(self.update)
+        self.setAccessibleName("Working")
+
+    def showEvent(self, event) -> None:  # noqa: N802
+        super().showEvent(event)
+        self._clock.start()
+        self._timer.start()
+
+    def hideEvent(self, event) -> None:  # noqa: N802
+        self._timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = theme.current()
+        t = self._clock.elapsed() if self._clock.isValid() else 0
+        width = max(2.0, self._size / 10)
+        box = QRectF(self.rect()).adjusted(width, width, -width, -width)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(p.divider), width))
+        painter.drawEllipse(box)
+        # The arc's length breathes between 30 and 270 degrees while the ring turns.
+        breath = (1 - math.cos(2 * math.pi * (t % self._BREATH_MS) / self._BREATH_MS)) / 2
+        span = 30 + 240 * breath
+        start = -360 * (t % self._TURN_MS) / self._TURN_MS - 120 * breath
+        pen = QPen(QColor(p.accent_text), width)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawArc(box, int(start * 16), int(-span * 16))
+
+
+class LoadingPanel(QWidget):
+    """The centred state of a view: a message, or, while something is worked out, a loader
+    with a spinner, what's happening and how far along it is."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("content")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(SPACE["xxl"], SPACE["xxl"], SPACE["xxl"], SPACE["xxl"])
+        outer.addStretch(2)
+        box = QWidget()
+        box.setFixedWidth(440)  # a fixed width lets wrapped labels report the right height
+        col = QVBoxLayout(box)
+        col.setContentsMargins(0, 0, 0, 0)
+        col.setSpacing(SPACE["s"])
+        self.spinner = Spinner(48)
+        col.addWidget(self.spinner, 0, Qt.AlignmentFlag.AlignHCenter)
+        col.addSpacing(SPACE["m"])
+        self.title = label("", "headline", wrap=True)
+        self.body = label("", "secondary", wrap=True)
+        col.addWidget(self.title)
+        col.addWidget(self.body)
+        self.bar = QProgressBar()
+        self.bar.setTextVisible(False)
+        self.bar.setFixedSize(280, 4)
+        self.bar.setAccessibleName("Progress")
+        col.addSpacing(SPACE["xs"])
+        col.addWidget(self.bar, 0, Qt.AlignmentFlag.AlignHCenter)
+        centred = QHBoxLayout()
+        centred.addStretch(1)
+        centred.addWidget(box)
+        centred.addStretch(1)
+        outer.addLayout(centred)
+        outer.addStretch(3)
+        self.set_state("", "")
+
+    def set_state(self, title: str, body: str = "", loading: bool = False, done: int = 0,
+                  total: int = 0) -> None:
+        """loading: show the spinner, and a bar when `total` says how far along it is. A loader
+        is centred; a message reads from the left, like the pages."""
+        side = Qt.AlignmentFlag.AlignHCenter if loading else Qt.AlignmentFlag.AlignLeft
+        for text in (self.title, self.body):
+            text.setAlignment(side)
+        self.title.setText(title)
+        self.body.setText(body)
+        self.body.setVisible(bool(body))
+        self.spinner.setVisible(loading)
+        self.bar.setVisible(loading and total > 0)
+        if total > 0:
+            self.bar.setRange(0, total)
+            self.bar.setValue(min(done, total))

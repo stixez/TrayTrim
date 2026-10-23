@@ -160,3 +160,17 @@ def test_damaged_mesh_is_reported_not_fatal(tmp_path):
     cut = good[:-6]  # key list cut short
     with pytest.raises(ReferenceParseError):
         references(key, cut, {})
+
+
+def test_images_and_videos_are_never_scanned():
+    from traytrim import restypes
+    from traytrim.dbpf import ResourceKey
+    from traytrim.references import LEAF_TYPES, may_refer
+
+    assert restypes.DDS_IMAGE in LEAF_TYPES and not may_refer(restypes.DDS_IMAGE)
+    big = 0xAAAA0000BBBB0001
+    holder = {big: [ResourceKey(restypes.RLE2, 0, big)]}
+    payload = big.to_bytes(8, "little") * 4
+    for magic in (b"DDS ", b"\x89PNG", b"\xff\xd8\xff", b"MVhd"):  # under any type
+        assert references(ResourceKey(0x12345678, 0, 1), magic + payload, holder) == []
+    assert references(ResourceKey(0x12345678, 0, 1), b"XXXX" + payload, holder)

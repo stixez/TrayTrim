@@ -86,9 +86,11 @@ def run(theme_override: str | None = None) -> int:
     settings = Settings.load()
     set_theme(app, theme_override if theme_override in THEMES else settings.theme)
     tasks.run_in_background(remove_stale_temp, lambda _n: None, lambda _e: None)
-    window = MainWindow(settings)
+    smoke_test = bool(os.environ.get("TRAYTRIM_SMOKE_TEST"))
+    window = MainWindow(settings, check_updates=not smoke_test
+                        and not os.environ.get("TRAYTRIM_NO_UPDATE_CHECK"))
     window.show()
-    if os.environ.get("TRAYTRIM_SMOKE_TEST"):
+    if smoke_test:
         # Packaging check: build the window, then quit cleanly (exit code 0).
         QTimer.singleShot(3000, app.quit)
     code = app.exec()

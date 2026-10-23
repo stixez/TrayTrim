@@ -10,21 +10,22 @@ from collections.abc import Callable
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QButtonGroup, QFileDialog, QFrame, QHBoxLayout, QLineEdit,
-                               QMainWindow, QPushButton, QSizePolicy, QStackedWidget, QStatusBar,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QDialog, QFileDialog, QFrame,
+                               QHBoxLayout, QLineEdit, QMainWindow, QPushButton, QSizePolicy,
+                               QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
 
-from traytrim import paths, tray
+from traytrim import SUPPORT_URL, paths, tray
 from traytrim.gui.gallery import PORTRAIT, TrayList
 from traytrim.gui.describe import THUMB_TYPES
 from traytrim.gui.household_view import HouseholdReport, HouseholdView
 from traytrim.gui.report_parts import MAX_CARDS, THUMB
 from traytrim.gui.images import load_portraits, load_thumbnails, load_tray_pictures
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
-from traytrim.gui import icons, theme
+from traytrim.gui import icons, system, theme
+from traytrim.gui.update_dialog import UpdateCheck, UpdateDialog
 from traytrim.gui.tasks import BackgroundTask, describe_error, run_in_background
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import DropOverlay, ElidedLabel, label, link_button
+from traytrim.gui.widgets import DropOverlay, ElidedLabel, Spinner, label, link_button
 from traytrim.index import ResourceIndex
 from traytrim.export import default_base_name
 from traytrim.gui.export_dialog import ExportDialog, ExportRequest
@@ -99,9 +100,10 @@ class FolderStatus(QWidget):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, check_updates: bool = False):
         super().__init__()
         self.settings = settings
+        self._check_updates = check_updates  # ask GitHub for a newer release once shown
         self.folders = paths.resolve_folders(settings.user_dir, settings.game_dir)
         # Each background job carries the generation it was started in; results from an older
         # generation (folder changed, another household picked) are dropped.
@@ -110,7 +112,7 @@ class MainWindow(QMainWindow):
         self._done_gen = -1  # the last analysis generation that produced a report or an error
         self._index_ready = False
         self._tray_ready = False  # the Tray folder is read (the gallery can be searched)
-        self._tray_state = ("", "")
+        self._tray_state = ("", "", False)  # title, body, loading
         self._tray_stamp = None  # the Tray folder's modification time when it was read
         self._tray_dirty = False  # the Tray changed; what uses what waits for the Mods check
         self._last_check = 0.0   # when the folders were last checked for changes
@@ -239,8 +241,10 @@ class MainWindow(QMainWindow):
         state_col = QVBoxLayout(state)
         state_col.setContentsMargins(SPACE["l"], SPACE["s"], SPACE["l"], 0)
         state_col.setSpacing(SPACE["s"])
+        self.tray_state_spinner = Spinner(24)
         self.tray_state_title = label("", None, wrap=True)
         self.tray_state_body = label("", "secondary", wrap=True)
+        state_col.addWidget(self.tray_state_spinner)
         state_col.addWidget(self.tray_state_title)
         state_col.addWidget(self.tray_state_body)
         state_col.addStretch(1)
@@ -396,6 +400,16 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.user_status)
         bar.addPermanentWidget(self.index_status)
         bar.addPermanentWidget(self.game_status)
+        coffee = link_button("Buy me a coffee")
+        coffee.setToolTip(f"TrayTrim is free. If it saves you time, you can support it: "
+                          f"{SUPPORT_URL}")
+        coffee.setAccessibleName("Buy me a coffee (opens buymeacoffee.com)")
+        coffee.clicked.connect(lambda: system.open_url(SUPPORT_URL))
+        coffee_box = QWidget()
+        coffee_row = QHBoxLayout(coffee_box)
+        coffee_row.setContentsMargins(SPACE["s"], 0, SPACE["l"], 0)
+        coffee_row.addWidget(coffee)
+        bar.addPermanentWidget(coffee_box)
         self.setStatusBar(bar)
 
     # Tray gallery
@@ -417,7 +431,7 @@ class MainWindow(QMainWindow):
                 "Choose your Sims 4 folder in the bar at the bottom. It's the folder that holds "
                 "Mods and Tray, usually Documents/Electronic Arts/The Sims 4.")
             return
-        self._set_tray_state("Reading your Tray folder", "")
+        self._set_tray_state("Reading your Tray folder", "", loading=True)
         run_in_background(lambda: tray.scan_tray(tray_dir),
                           lambda result: self._on_tray_scanned(gen, result),
                           lambda e: self._on_tray_failed(gen, tray_dir, e))
@@ -469,13 +483,14 @@ class MainWindow(QMainWindow):
         self.search.setEnabled(self._mods_listed == self._mods_gen if self._kind is MODS
                                else self._tray_ready)
 
-    def _set_tray_state(self, title: str, body: str) -> None:
+    def _set_tray_state(self, title: str, body: str, loading: bool = False) -> None:
         """The Tray folder's state in place of the gallery (shown when a Tray tab is open)."""
-        self._tray_state = (title, body)
+        self._tray_state = (title, body, loading)
         if self._kind is not MODS:
-            self._show_state(title, body)
+            self._show_state(title, body, loading)
 
-    def _show_state(self, title: str, body: str) -> None:
+    def _show_state(self, title: str, body: str, loading: bool = False) -> None:
+        self.tray_state_spinner.setVisible(loading)
         self.tray_state_title.setText(title)
         self.tray_state_body.setText(body)
         self.tray_state_body.setVisible(bool(body))
@@ -560,7 +575,7 @@ class MainWindow(QMainWindow):
             self.household.show_message(
                 item.name or f"Unnamed {item.kind}",
                 "Waiting for the index of your Mods and game packages. The CC list appears as "
-                "soon as it's ready.")
+                "soon as it's ready.", loading=True)
             return
         gen = self._analysis_gen
         # Only show "Reading..." if it takes long enough to notice; avoids a flash.
@@ -580,7 +595,7 @@ class MainWindow(QMainWindow):
             self.household.show_message(
                 item.name or f"Unnamed {item.kind}",
                 "Reading its Sims." if item.type == tray.ITEM_HOUSEHOLD
-                else "Reading its objects and build items.")
+                else "Reading its objects and build items.", loading=True)
 
     def _on_report(self, gen: int, report: HouseholdReport) -> None:
         if gen != self._analysis_gen:
@@ -890,9 +905,9 @@ class MainWindow(QMainWindow):
         elif not self._index_ready:
             self._show_state("Waiting for the index",
                              "TrayTrim is reading your Mods folder and the game. The packages "
-                             "show up here when it's done.")
+                             "show up here when it's done.", loading=True)
         elif self._mods_listed != self._mods_gen and not self.mods_list.source.packages:
-            self._show_state("Reading your Mods folder", "")
+            self._show_state("Reading your Mods folder", "", loading=True)
         elif not self.mods_list.source.packages:
             self._show_state("No packages in your Mods folder",
                              "Packages the game loads from Mods show up here.")
@@ -1339,6 +1354,25 @@ class MainWindow(QMainWindow):
             self._index_started = True
             self._check_index_ready()
             QTimer.singleShot(0, self._refresh_index)  # after the first paint
+            if self._check_updates:
+                QTimer.singleShot(3000, self._check_for_update)
+
+    def _check_for_update(self) -> None:
+        """A newer release on GitHub: offer it (once per start, unless skipped)."""
+        self._update_check = UpdateCheck(self)
+        self._update_check.found.connect(self._offer_update)
+        self._update_check.start(self.settings.skipped_version)
+
+    def _offer_update(self, release) -> None:
+        if not self.isVisible():
+            return
+        # Not in the middle of something: another dialog (an export), a file picker (native,
+        # so not a QDialog, but the window isn't active then), or another app in front.
+        if not self.isActiveWindow() or any(isinstance(w, QDialog) and w.isVisible()
+                                            for w in QApplication.topLevelWidgets()):
+            QTimer.singleShot(10_000, self, lambda: self._offer_update(release))
+            return
+        self._run_dialog(UpdateDialog(release, self.settings, self))
 
     def stop_work(self) -> None:
         """Ask the background work to stop: the index refresh stops at its next check (SQLite

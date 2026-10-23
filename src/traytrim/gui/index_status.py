@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QDialog, QHBoxLayout, QPlainTextEdit, QProgressBa
 
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import SPACE, mono_font
-from traytrim.gui.widgets import label, link_button, set_role
+from traytrim.gui.widgets import Spinner, label, link_button, set_role
 from traytrim.index import MODS, ResourceIndex, UpdateResult
 
 
@@ -28,12 +28,13 @@ class IndexStatus(QWidget):
         self.bar.setTextVisible(False)
         self.bar.setFixedSize(96, 4)
         self.bar.setAccessibleName("Indexing progress")
+        self.spinner = Spinner(14)
         self.text = label("", "caption")
         self.details = link_button("Details")
         self.details.clicked.connect(on_details)
         self.retry = link_button("Try again")
         self.retry.clicked.connect(on_retry)
-        for w in (self.bar, self.text, self.details, self.retry):
+        for w in (self.spinner, self.bar, self.text, self.details, self.retry):
             lay.addWidget(w)
         self.show_idle()
 
@@ -42,6 +43,7 @@ class IndexStatus(QWidget):
         self.text.setText(text)
         set_role(self.text, role)
         self.bar.setVisible(bar)
+        self.spinner.setVisible(bar)
         self.details.setVisible(details)
         self.retry.setVisible(retry)
 

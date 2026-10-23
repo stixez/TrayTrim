@@ -18,7 +18,7 @@ from traytrim.gui.describe import (THUMB_TYPES, card_caption, display_name, grou
 from traytrim.gui.report_parts import (MAX_CARDS, CcCard, Hero, PagedCcList, Picture, Section,
                                        first_items, item_menu)
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import Notice, ShowMore, SimChip, label
+from traytrim.gui.widgets import LoadingPanel, Notice, ShowMore, SimChip, label, link_button
 from traytrim.names import ItemName
 from traytrim.plan import Plan, PlannedResource
 from traytrim.resolve import LocatedRef, Summary, ref_label, summarize
@@ -100,7 +100,8 @@ class HouseholdView(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
         outer.addWidget(self.stack)
-        self.message_page, self.message_title, self.message_body = self._message_page()
+        self.message_page = LoadingPanel()
+        self.message_title, self.message_body = self.message_page.title, self.message_page.body
         self.stack.addWidget(self.message_page)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -113,37 +114,12 @@ class HouseholdView(QWidget):
 
     # States
 
-    def _message_page(self):
-        page = QWidget()
-        page.setObjectName("content")
-        page.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        outer = QVBoxLayout(page)
-        outer.setContentsMargins(SPACE["xxl"], SPACE["xxl"], SPACE["xxl"], SPACE["xxl"])
-        outer.addStretch(2)
-        box = QWidget()
-        box.setFixedWidth(440)  # a fixed width lets wrapped labels report the right height
-        col = QVBoxLayout(box)
-        col.setContentsMargins(0, 0, 0, 0)
-        col.setSpacing(SPACE["s"])
-        title = label("", "headline", wrap=True)
-        body = label("", "secondary", wrap=True)
-        col.addWidget(title)
-        col.addWidget(body)
-        centred = QHBoxLayout()
-        centred.addStretch(1)
-        centred.addWidget(box)
-        centred.addStretch(1)
-        outer.addLayout(centred)
-        outer.addStretch(3)
-        return page, title, body
-
-    def show_message(self, title: str, body: str) -> None:
+    def show_message(self, title: str, body: str, loading: bool = False) -> None:
+        """loading: a loader screen with a spinner, while the item is read."""
         self._report = None
         self._plan = None
         self._gameplay = []
-        self.message_title.setText(title)
-        self.message_body.setText(body)
-        self.message_body.setVisible(bool(body))
+        self.message_page.set_state(title, body, loading)
         self.stack.setCurrentWidget(self.message_page)
 
     def show_report(self, report: HouseholdReport) -> None:
@@ -433,6 +409,15 @@ class HouseholdView(QWidget):
             tools.addWidget(search)
             self.match_label = label("", "secondary")
             tools.addWidget(self.match_label)
+            tools.addSpacing(SPACE["s"])
+            for text, included in (("Include all", True), ("Leave all out", False)):
+                button = link_button(text)
+                button.setAccessibleName(text)  # so a rebuild gives the focus back
+                button.setToolTip(f"{'Put every item back in' if included else 'Leave every item out of'} "
+                                  "the export at once. While you search, only the items that "
+                                  "match.")
+                button.clicked.connect(lambda _c=False, i=included: self._set_all(i))
+                tools.addWidget(button)
             tools.addStretch(1)
             tools.addWidget(label("Sort by", "secondary"))
             tools.addWidget(self._sort_toggle())
@@ -856,6 +841,30 @@ class HouseholdView(QWidget):
             r.excluded.discard(ref)
         else:
             r.excluded.add(ref)
+        self._exclusion_updated()
+
+    def _set_all(self, included: bool) -> None:
+        """Include all, or Leave all out: every CC item, or the ones the search matches."""
+        r = self._report
+        if r is None:
+            return
+        refs = {x.ref for x in self._summary.cc if self._matches(x)}
+        before = set(r.excluded)
+        if included:
+            r.excluded -= refs
+        else:
+            r.excluded |= refs
+        if r.excluded == before:
+            return
+        if self._list is not None:
+            self._rebuild()  # the list shows what's left out as it's built
+        for card in self._all_cards:
+            if card.ref.ref in refs:
+                card.set_included(included)
+        self._exclusion_updated()
+
+    def _exclusion_updated(self) -> None:
+        r = self._report
         n_out = len(r.excluded & {x.ref for x in self._summary.cc})
         self.excluded_label.setText(f"{n_out} left out" if n_out else "")
         self._plan = None  # the shown plan no longer matches; nothing may export it

@@ -23,6 +23,11 @@ DEFORMER_MAP = 0xDB43E069  # slider shape data. community name; found by scannin
 BONE_DELTA = 0x0355E0A6    # observed sharing instances with sim modifiers
 BLEND_GEOMETRY = 0x067CAA11  # observed sharing instances with modifiers and sculpts; verify too
 
+# Payloads that never refer to anything. Observed in a real Mods folder: every DDS image read
+# starts with "DDS " (skin tones and overlays; 55 GB of them there), every video with "MVhd".
+DDS_IMAGE = 0xB6C8B6A0
+VIDEO = 0x376840D7
+
 # Build/buy. ObjectDefinition and ObjectCatalog: s4tk, and observed: every object placed on a
 # real lot has exactly one of each with its definition id as instance. Object thumbnails:
 # observed next to them (JPEG). Model, ModelLod, Light, Slot, Rig: s4tk.

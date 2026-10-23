@@ -26,7 +26,11 @@ from traytrim import restypes
 from traytrim.dbpf import ResourceKey
 
 LEAF_TYPES = restypes.TEXTURE_TYPES | {restypes.THUM, restypes.OBJECT_THUMB,
-                                       restypes.STRING_TABLE}
+                                       restypes.STRING_TABLE, restypes.DDS_IMAGE,
+                                       restypes.VIDEO}
+# Images and videos stored under a type not listed above: they hold no references either, and
+# scanning one (often megabytes) would take far longer than everything else in its package.
+_PAYLOAD_MAGIC = (b"DDS ", b"\x89PNG", b"\xff\xd8\xff", b"MVhd")
 # Resources whose references may point into other packages (a recolor's object definition
 # using a mesh from a separate mesh package). Their bytes are also checked against the whole
 # index, limited to ASSET_TYPES so an accidental match can't pull in unrelated content.
@@ -37,7 +41,7 @@ ASSET_TYPES = (restypes.TEXTURE_TYPES
 # Large resources that are never scanned (they're binary payloads, not reference holders).
 _NO_SCAN_TYPES = LEAF_TYPES | {restypes.GEOM, restypes.BLEND_GEOMETRY, restypes.DEFORMER_MAP,
                                 restypes.BONE_DELTA}
-_MIN_SCAN_INSTANCE = 1 << 32
+MIN_SCAN_INSTANCE = 1 << 32
 _MAX_SCAN_BYTES = 4 << 20
 
 
@@ -105,7 +109,7 @@ def geom_keys(data: bytes) -> list[ResourceKey]:
     return out
 
 
-_MAX_CROSS_SCAN_BYTES = 256 << 10  # reference holders are small; geometry isn't scanned
+MAX_CROSS_SCAN_BYTES = 256 << 10  # reference holders are small; geometry isn't scanned
 
 
 def _values(data: bytes):
@@ -119,17 +123,19 @@ def _values(data: bytes):
 def large_values(data: bytes) -> set[int]:
     """Every 64-bit value of at least 2^32 in data, at any byte alignment."""
     found: set[int] = set()
-    for values in _values(data[:_MAX_CROSS_SCAN_BYTES]):
-        found.update(v for v in values if v >= _MIN_SCAN_INSTANCE)
+    for values in _values(data[:MAX_CROSS_SCAN_BYTES]):
+        found.update(v for v in values if v >= MIN_SCAN_INSTANCE)
     return found
 
 
-def scan_instances(data: bytes, candidates: set[int]) -> set[int]:
-    """Which of these 64-bit instances occur anywhere in data (at any byte alignment)."""
+def scan_instances(data: bytes, candidates: set[int], limit: int = _MAX_SCAN_BYTES) -> set[int]:
+    """Which of these 64-bit instances occur anywhere in data (at any byte alignment), looking
+    at up to `limit` bytes. Much faster than large_values() & candidates: the values never go
+    through Python code one by one."""
     if not candidates:
         return set()
     found: set[int] = set()
-    for values in _values(data[:_MAX_SCAN_BYTES]):
+    for values in _values(data[:limit]):
         found |= candidates.intersection(values)
     return found
 
@@ -140,10 +146,16 @@ def may_refer(type_id: int) -> bool:
     return type_id in (restypes.CASP, restypes.GEOM) or type_id not in _NO_SCAN_TYPES
 
 
-def references(key: ResourceKey, data: bytes,
-               package_keys: dict[int, list[ResourceKey]]) -> list[Reference]:
+def scan_candidates(package_keys: dict[int, list[ResourceKey]]) -> set[int]:
+    """The instances of a package that the scan looks for (work it out once per package)."""
+    return {i for i in package_keys if i >= MIN_SCAN_INSTANCE}
+
+
+def references(key: ResourceKey, data: bytes, package_keys: dict[int, list[ResourceKey]],
+               candidates: set[int] | None = None) -> list[Reference]:
     """Keys `key` (with decompressed `data`) refers to. package_keys maps instance -> keys of the
-    package the resource comes from (used by the scan)."""
+    package the resource comes from (used by the scan); candidates: scan_candidates() of it,
+    for callers that look at many resources of one package."""
     try:
         if key.type == restypes.CASP:
             return [Reference(k, "tgi") for k in casp_keys(data) if not is_null(k)]
@@ -151,9 +163,10 @@ def references(key: ResourceKey, data: bytes,
             return [Reference(k, "tgi") for k in geom_keys(data) if not is_null(k)]
     except struct.error as e:  # a damaged resource; reported, never fatal for the plan
         raise ReferenceParseError(f"damaged {restypes.name(key.type).lower()} ({e})") from None
-    if key.type in _NO_SCAN_TYPES:
+    if key.type in _NO_SCAN_TYPES or data.startswith(_PAYLOAD_MAGIC):
         return []
-    candidates = {i for i in package_keys if i >= _MIN_SCAN_INSTANCE}
+    if candidates is None:
+        candidates = scan_candidates(package_keys)
     out = []
     for instance in scan_instances(data, candidates):
         for k in package_keys[instance]:

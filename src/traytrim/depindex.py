@@ -11,7 +11,8 @@ assets of other packages whose instances they hold.
 Those cross-package matches depend on what else is in Mods. A package read again is matched
 against all of Mods as it is then. When it brings meshes or textures no other package has, the
 packages that weren't read again are searched for them too (those keys wait in `pending` until
-that search finished, so a cancel or a locked package doesn't lose them).
+that search finished, so a cancel doesn't lose them; a package that can't be searched right now
+is read again in full at the next update).
 """
 
 from __future__ import annotations
@@ -29,10 +30,11 @@ from traytrim.dbpf import ResourceKey
 from traytrim.index import ResourceIndex, _s64
 from traytrim.paths import cache_dir
 from traytrim.plan import Cancelled
-from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, ReferenceParseError, large_values,
-                                 may_refer, references)
+from traytrim.references import (ASSET_TYPES, CROSS_SCAN_TYPES, MAX_CROSS_SCAN_BYTES,
+                                 MIN_SCAN_INSTANCE, ReferenceParseError, large_values, may_refer,
+                                 references, scan_candidates, scan_instances)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4  # 4: images and videos are no longer scanned for references
 READ, MATCH = "read", "match"
 
 # progress(phase, done, total): READ counts packages read, MATCH packages searched for new
@@ -66,10 +68,6 @@ def _u64(s: int) -> int:
     return s + (1 << 64) if s < 0 else s
 
 
-_FILTER_FROM = 300           # packages to read before the asset filter pays for itself
-_FILTER_MASK = (1 << 24) - 1  # 16 MB, one byte per low-24-bit value
-
-
 def _taken_along(pkg: dbpf.Package, by_instance: dict[int, list[ResourceKey]]
                  ) -> list[tuple[ResourceKey, ResourceKey]]:
     """What the export plan takes along with an item from its own package without a reference
@@ -88,13 +86,14 @@ def _taken_along(pkg: dbpf.Package, by_instance: dict[int, list[ResourceKey]]
     return rows
 
 
-def _asset_filter(index: ResourceIndex) -> bytearray:
-    """A byte per possible low 24 bits of an instance, set when an asset in Mods has them. A
-    value whose byte isn't set can't be an asset's instance; one whose byte is set may be."""
-    table = bytearray(_FILTER_MASK + 1)
-    for inst in index.mods_instances(ASSET_TYPES):
-        table[inst & _FILTER_MASK] = 1
-    return table
+_ASSETS_FROM = 50  # packages to read before _asset_instances pays for itself
+
+
+def _asset_instances(index: ResourceIndex) -> set[int]:
+    """The instances of every asset in Mods that a scan can find (large_values() keeps only
+    values of at least 2^32): what object definitions, catalog entries and models are matched
+    against. A few hundred thousand on a big Mods folder."""
+    return {i for i in index.mods_instances(ASSET_TYPES) if i >= MIN_SCAN_INSTANCE}
 
 
 @dataclass(frozen=True)
@@ -111,7 +110,7 @@ class DependencyIndex:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path else cache_dir() / "deps.sqlite"
         self.unreadable: list[Path] = []  # packages the last update couldn't read
-        self._assets: bytearray | None = None
+        self._assets: set[int] | None = None
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.db = self._open()
 
@@ -182,20 +181,20 @@ class DependencyIndex:
         db.commit()
 
         self.unreadable = []
-        # Reading many packages (the first build): object definitions and models hold
-        # thousands of 64-bit values each, nearly all of them not an asset in Mods. A table of
-        # the low bits of every asset instance in Mods lets those be dropped before the lookup.
-        self._assets = _asset_filter(index) if len(todo) >= _FILTER_FROM else None
+        # Object definitions and models hold thousands of 64-bit values each, nearly all of
+        # them not an asset in Mods. Reading many packages, they're matched against all the
+        # assets there in one go; for a few, listing those assets would take longer.
+        self._assets = _asset_instances(index) if len(todo) >= _ASSETS_FROM else None
         last_commit = time.monotonic()
         for done, p in enumerate(todo, 1):
             self._check(cancel)
-            read = self._read(p.path)
+            read = self._read(p.path, cancel, self._assets)
             if read is None:
                 # Locked or damaged right now: not stored, so the next update tries again.
                 self.unreadable.append(p.path)
                 continue
             rows, holders, own = read
-            cross_rows = self._match(index, holders, own, self._assets)
+            cross_rows = self._match(index, holders, own)
             cur = db.execute("INSERT INTO packages (path, size, mtime_ns, cross) VALUES (?,?,?,?)",
                              (str(p.path), p.size, p.mtime_ns, int(bool(holders))))
             pkg = cur.lastrowid
@@ -231,10 +230,10 @@ class DependencyIndex:
             by_instance.setdefault(key.instance, []).append(key)
         if not by_instance:
             return
-        wanted = set(by_instance)
+        wanted = {i for i in by_instance if i >= MIN_SCAN_INSTANCE}  # what a scan can find
         holders = [(pkg_id, path) for pkg_id, path in db.execute(
             "SELECT id, path FROM packages WHERE cross=1") if Path(path) not in skip]
-        missed = False
+        missed: list[int] = []
         for done, (pkg_id, path) in enumerate(holders, 1):
             self._check(cancel)
             rows = []
@@ -245,13 +244,13 @@ class DependencyIndex:
                         if e.key.type not in CROSS_SCAN_TYPES:
                             continue
                         try:
-                            found = large_values(pkg.read(e)) & wanted
+                            found = scan_instances(pkg.read(e), wanted, MAX_CROSS_SCAN_BYTES)
                         except dbpf.DbpfError:
                             continue
                         rows += [(e.key, k) for inst in found for k in by_instance[inst]
                                  if k not in own]
             except (dbpf.DbpfError, OSError):
-                missed = True  # gone or locked: the keys stay pending for the next update
+                missed.append(pkg_id)  # gone or locked right now: read in full next time
                 self.unreadable.append(Path(path))
                 continue
             db.executemany("INSERT OR IGNORE INTO refs VALUES (?,?,?,?,?,?,?,1)",
@@ -259,21 +258,22 @@ class DependencyIndex:
                              _s64(f.instance), f.type, f.group) for f, t in rows))
             if progress:
                 progress(MATCH, done, len(holders))
-        if not missed:
-            db.execute("DELETE FROM pending")
+        # A package that couldn't be searched keeps what it had, and is marked as changed: the
+        # next update reads it again in full, matched against all of Mods (the pending assets
+        # too). So the pending assets are done either way; keeping them would search every
+        # package again at each update.
+        db.executemany("UPDATE packages SET mtime_ns = -1 WHERE id = ?", ((i,) for i in missed))
+        db.execute("DELETE FROM pending")
         db.commit()
 
     @staticmethod
     def _match(index: ResourceIndex, holders: list[tuple[ResourceKey, set[int]]],
-               own: set[ResourceKey], assets: bytearray | None = None
-               ) -> list[tuple[ResourceKey, ResourceKey]]:
+               own: set[ResourceKey]) -> list[tuple[ResourceKey, ResourceKey]]:
         """The assets in other packages that one package's object definitions, catalog
         entries and models refer to (one lookup for the whole package)."""
         if not holders:
             return []
         values = set().union(*(vals for _key, vals in holders))
-        if assets is not None:
-            values = {v for v in values if assets[v & _FILTER_MASK]}
         by_instance: dict[int, list[ResourceKey]] = {}
         for k in index.mods_keys_for_instances(values, ASSET_TYPES):
             if k not in own:
@@ -282,10 +282,12 @@ class DependencyIndex:
                 for k in by_instance[inst]]
 
     @staticmethod
-    def _read(path: Path) -> tuple[list, list, set] | None:
+    def _read(path: Path, cancel: threading.Event | None = None, assets: set[int] | None = None
+              ) -> tuple[list, list, set] | None:
         """For one package: (referring key, referred key) for every reference inside it, its
-        object definitions, catalog entries and models with the values they hold (matched
-        against other packages), and its keys. None if it can't be read."""
+        object definitions, catalog entries and models with the values they hold that are
+        asset instances in Mods (every large value without `assets`), matched against other
+        packages, and its keys. None if it can't be read."""
         rows: list[tuple[ResourceKey, ResourceKey]] = []
         holders: list[tuple[ResourceKey, set[int]]] = []
         try:
@@ -293,16 +295,21 @@ class DependencyIndex:
                 by_instance: dict[int, list[ResourceKey]] = {}
                 for e in pkg:
                     by_instance.setdefault(e.key.instance, []).append(e.key)
-                for e in pkg:
+                candidates = scan_candidates(by_instance)
+                for n, e in enumerate(pkg):
+                    if n % 64 == 0:  # a big merge takes a while: stop when asked
+                        DependencyIndex._check(cancel)
                     if not may_refer(e.key.type):
                         continue
                     try:
                         data = pkg.read(e)
-                        rows += [(e.key, r.key) for r in references(e.key, data, by_instance)]
+                        rows += [(e.key, r.key)
+                                 for r in references(e.key, data, by_instance, candidates)]
                     except (dbpf.DbpfError, ReferenceParseError):
                         continue  # the export plan reports unreadable resources
                     if e.key.type in CROSS_SCAN_TYPES:
-                        holders.append((e.key, large_values(data)))
+                        holders.append((e.key, large_values(data) if assets is None else
+                                        scan_instances(data, assets, MAX_CROSS_SCAN_BYTES)))
                 rows += _taken_along(pkg, by_instance)
                 own = {e.key for e in pkg}
         except (dbpf.DbpfError, OSError):

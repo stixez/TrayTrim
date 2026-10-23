@@ -44,7 +44,9 @@ def test_own_export_is_intact_and_already_installed(seaside_zip, index):  # noqa
     try:
         assert r.integrity.ok and r.kind == "lot" and r.name == "Seaside"
         assert [i.item.name for i in r.items] == ["Seaside"]
-        assert r.packages == ["Seaside_TrayTrim.package"] and r.package_bytes > 0
+        assert sorted(r.packages) == ["chair_AAAA000000000001_TT.package",
+                                      "walls_BBBB000000000001_TT.package"]
+        assert r.package_bytes > 0
         assert {x.ref.instance for x in r.cc} == {CHAIR, WALL.instance}
         assert r.overlap and all(o.same for o in r.overlap)
         # Nobody has these: the lamp, the floor and the model override.
@@ -60,13 +62,11 @@ def test_a_differing_copy_and_a_missing_pack(tmp_path, seaside_zip, recipient):
     edited = tmp_path / "edited.zip"
     with zipfile.ZipFile(seaside_zip) as src, zipfile.ZipFile(edited, "w") as dst:
         for info in src.infolist():
-            data = src.read(info)
-            if info.filename == "report.json":
-                report = json.loads(data)
-                report["game_packs"] = ["EP09", "base"]
-                report["gameplay_mods"] = ["Traits/MoreTraits.package"]
-                data = json.dumps(report).encode()
-            dst.writestr(info, data)
+            dst.writestr(info, src.read(info))
+        meta = json.loads(src.comment)
+        meta["game_packs"] = ["EP09", "base"]
+        meta["gameplay_mods"] = ["Traits/MoreTraits.package"]
+        dst.comment = json.dumps(meta).encode()
     r = check_received(edited, recipient)
     try:
         [chair] = r.overlap
@@ -271,16 +271,74 @@ def test_package_names_differing_only_in_case_are_both_kept(tmp_path, index, tra
         r.close()
 
 
-def test_a_report_with_fields_of_the_wrong_type(tmp_path, seaside_zip, index):  # noqa: F811
+def test_a_record_with_fields_of_the_wrong_type(tmp_path, seaside_zip, index):  # noqa: F811
     edited = tmp_path / "edited.zip"
     with zipfile.ZipFile(seaside_zip) as src, zipfile.ZipFile(edited, "w") as dst:
         for info in src.infolist():
-            data = src.read(info)
-            if info.filename == "report.json":
-                report = json.loads(data)
-                report["game_packs"], report["gameplay_mods"] = "EP01", "Traits.package"
-                data = json.dumps(report).encode()
-            dst.writestr(info, data)
+            dst.writestr(info, src.read(info))
+        meta = json.loads(src.comment)
+        meta["game_packs"], meta["gameplay_mods"] = "EP01", "Traits.package"
+        meta["packages"] = "not a list"
+        dst.comment = json.dumps(meta).encode()
     r = check_received(edited, index)
     r.close()
+    assert r.report is not None and r.report["game_packs"] == "EP01"  # the edit was read
     assert r.packs_needed == [] and r.gameplay_mods == []  # not split into letters
+    assert r.integrity.ok  # a record it can't use is no record, not a failure
+
+
+def old_export(tmp_path, new_zip):
+    """The zip TrayTrim 0.3.0 wrote for the same export: one package with every file, and a
+    report.json listing them, no zip comment."""
+    from traytrim import dbpf
+
+    files, entries = [], []
+    with zipfile.ZipFile(new_zip) as z:
+        z.extractall(tmp_path / "new")
+        names = z.namelist()
+    for name in names:
+        if name.endswith(".package"):
+            with dbpf.Package(tmp_path / "new" / name) as pkg:
+                entries += [(e.key, pkg.read_raw(e), e.compression, e.mem_size) for e in pkg]
+    merged = tmp_path / "Seaside_TrayTrim.package"
+    with dbpf.PackageWriter(merged) as w:
+        for key, raw, comp, size in sorted(entries, key=lambda e: e[0]):
+            w.add_raw(key, raw, comp, size)
+    with dbpf.Package(merged) as pkg:
+        files = [{"key": str(e.key), "bytes": e.file_size} for e in pkg]
+    old = tmp_path / "old.zip"
+    with zipfile.ZipFile(old, "w") as dst:
+        dst.write(merged, "Mods/Seaside_TrayTrim.package")
+        for name in names:
+            if name.startswith("Tray/"):
+                dst.write(tmp_path / "new" / name, name)
+        dst.writestr("README.txt", "Seaside: exported with TrayTrim 0.3.0")
+        dst.writestr("report.json", json.dumps({
+            "traytrim": "0.3.0", "name": "Seaside", "kind": "lot", "files": files,
+            "game_packs": ["EP09", "base"], "gameplay_mods": ["Traits/Lot.package"]}))
+    return old
+
+
+def test_exports_from_before_still_get_their_full_check(tmp_path, seaside_zip, index):  # noqa: F811
+    from traytrim.verify import check_zip
+
+    old = old_export(tmp_path, seaside_zip)
+    assert [c.name for c in check_zip(old).checks][-1] == "It matches its report"
+    assert check_zip(old).ok
+    r = check_received(old, index)
+    try:
+        names = [c.name for c in r.integrity.checks]
+        assert r.integrity.ok and "It matches its report" in names
+        assert r.packages == ["Seaside_TrayTrim.package"] and r.kind == "lot"
+        assert r.packs_needed == ["EP09", "base"] and r.gameplay_mods == ["Traits/Lot.package"]
+        assert {x.ref.instance for x in r.cc} == {CHAIR, WALL.instance}
+    finally:
+        r.close()
+
+
+def test_new_exports_get_the_full_check_too(tmp_path, seaside_zip, index):  # noqa: F811
+    r = check_received(seaside_zip, index)
+    r.close()
+    assert [c.name for c in r.integrity.checks] == [
+        "The zip is intact", "The packages read back", "It holds what was exported"]
+    assert r.integrity.ok

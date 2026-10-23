@@ -6,7 +6,7 @@
 
 <p align="center">
   Export a Sims 4 household, lot or room with only the custom content it actually uses.<br>
-  One small package, checked file by file, instead of gigabytes of whole packages.
+  A small package per CC item, checked file by file, instead of gigabytes of whole packages.
 </p>
 
 <p align="center">
@@ -27,7 +27,9 @@ gigabyte along. On a real Mods folder with 4,500 packages, one single-Sim househ
 TrayTrim reads the tray files, works out exactly which resources are needed (for Sims: CAS
 parts, meshes, textures, thumbnails, sliders, sculpts, skin tones; for lots and rooms: objects,
 their models and textures, walls, floors and other build items), copies just those out of whatever
-packages they live in, writes them into one package next to the tray files, and checks the result.
+packages they live in, writes them into one package per CC item next to the tray files, each
+named the way its creator named it (`Nivelle_yfTop_HalterBackZip_SolidBlack_TT.package`), and checks
+the result. The zip holds the packages, the tray files and a README that says how to install it.
 
 ## What it does
 
@@ -43,18 +45,20 @@ packages they live in, writes them into one package next to the tray files, and 
 - **Shows what everything is**: CC by its own name ("Driftwood Rattan Chair", "Soft Bob"), with
   its thumbnail, searchable and sortable by category, size or name. Lots, rooms and households
   show their own tray picture.
-- **Lets you leave things out** with a click, and export only some Sims of a household. The size
-  updates as you go.
-- **Never copies game content.** Items from the base game and packs stay out; the report lists the
+- **Lets you leave things out** with a click, or all of them at once (Include all, Leave all out,
+  for what the search matches), and export only some Sims of a household. The size updates as
+  you go.
+- **Never copies game content.** Items from the base game and packs stay out; the README lists the
   packs the Sims use.
-- **Checks every export**: the package reopens, every file decompresses to the same bytes as its
-  source, everything the CC refers to is there, every CC item is included.
-- **Says what it can't trim**: gameplay mods (traits, moods, careers) the Sims depend on, and default
-  replacements, are listed in the export's README.
+- **Checks every export**: the packages reopen, every file decompresses to the same bytes as its
+  source and is in one package only, everything the CC refers to is there, every CC item is
+  included.
+- **Says what it can't trim**: gameplay mods (traits, moods, careers) the Sims depend on are listed in
+  the export's README, and default replacements in the app before you export.
 - **Prepares an in-game test**: a folder with only the export and steps to try it in your game
   with nothing else installed, then put your Mods back.
-- **Exports several at once**, one verified zip each, or together in one zip that shares one
-  package, like a lot with the household that lives there. A history keeps every export.
+- **Exports several at once**, one verified zip each, or together in one zip that shares its
+  packages, like a lot with the household that lives there. A history keeps every export.
 - **Exports one item on its own**: right-click any CC item for a small package with just that
   item and everything it needs, even when it lives in a 1 GB merge.
 - **Shows what breaks if you delete a package** (the Mods tab): which other CC needs its meshes

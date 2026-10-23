@@ -132,10 +132,11 @@ def test_a_texture_referenced_in_another_format_is_still_needed(tmp_path):
         assert users(textures, deps, usage, index) == [household]
 
 
-def test_the_asset_filter_for_big_builds_finds_the_same(tmp_path, monkeypatch):
+def test_matching_against_the_assets_finds_what_all_values_find(tmp_path, monkeypatch):
     import traytrim.depindex
 
-    monkeypatch.setattr(traytrim.depindex, "_FILTER_FROM", 0)  # use it even for two packages
+    # Matched against all the assets in Mods even for two packages (a big first build).
+    monkeypatch.setattr(traytrim.depindex, "_ASSETS_FROM", 0)
     test_objects_find_their_mesh_in_another_package_even_when_it_comes_later(tmp_path)
 
 

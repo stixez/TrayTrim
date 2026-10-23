@@ -266,8 +266,8 @@ class ReceivedView(ReportPage):
                     f"{os.path.join(sims, 'Mods')}.\n"
                     "3. Start the game and find it in the Library.")
         else:
-            body = (f"Copy the package from the zip into {os.path.join(sims, 'Mods')}, then start "
-                    "the game.")
+            body = (f"Copy the package{'s' if len(r.packages) > 1 else ''} from the zip into "
+                    f"{os.path.join(sims, 'Mods')}, then start the game.")
         actions = []
         if self.user_dir is not None:
             for name in (["Tray", "Mods"] if r.items else ["Mods"]):

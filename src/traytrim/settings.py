@@ -23,6 +23,7 @@ class Settings:
     window_geometry: str | None = None
     tray_kind: str = "household"    # which kind of tray item the gallery shows, or "mods"
     mods_sort: str = "name"         # the Mods list: "name" (load order) or "size" (largest first)
+    skipped_version: str | None = None  # an update the user chose not to be asked about again
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:

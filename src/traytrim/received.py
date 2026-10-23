@@ -34,7 +34,8 @@ from traytrim.plan import Cancelled
 from traytrim.resolve import EXPECTED_TYPE, LocatedRef, Where, locate
 from traytrim.tray import RefKind, TrayItem, TrayRef
 from traytrim.verify import (MAX_REPORT, ZIP_ERRORS, Check, MemberDamaged, Verification,
-                             check_zip, copy_member)
+                             check_zip, copy_member, read_back, record_check,
+                             read_zip_comment)
 
 # progress(step, done, total); step is "check", "copy", "index" or "compare".
 Progress = Callable[[str, int, int], None]
@@ -71,7 +72,7 @@ class Received:
     zip_size: int
     workdir: Path
     integrity: Verification
-    report: dict | None = None                 # a TrayTrim export's report.json
+    report: dict | None = None                 # a TrayTrim export's report.json or zip comment
     items: list[ReceivedItem] = field(default_factory=list)
     packages: list[str] = field(default_factory=list)
     package_bytes: int = 0
@@ -189,6 +190,8 @@ def check_received(zip_path: Path, index: ResourceIndex, progress: Progress | No
                     result.report = report if isinstance(report, dict) else None
                 except ZIP_ERRORS:
                     pass
+            else:  # newer exports keep it in the zip's comment, not in a file
+                result.report = read_zip_comment(z.comment)
             damaged = _copy_out(z, names, result, packages[0] if exported else None,
                                 not exported, progress, cancel)
         if not exported:
@@ -199,6 +202,14 @@ def check_received(zip_path: Path, index: ResourceIndex, progress: Progress | No
                 if not damaged else
                 f"{n:,} file{'' if n == 1 else 's'} in it {'is' if n == 1 else 'are'} damaged.",
                 damaged)])
+            if not damaged and result.report is not None and (
+                    "packages" in result.report or "packages_digest" in result.report):
+                # A TrayTrim export that records its packages: as thorough as check_zip.
+                read, counts = read_back([result.workdir / "Mods" / p for p in result.packages],
+                                         cancel)
+                record = record_check(result.report, [f"Mods/{p}" for p in result.packages],
+                                      counts)
+                result.integrity.checks += [read] + ([record] if record is not None else [])
         _compare(result, index, progress, cancel)
         return result
     except BaseException:

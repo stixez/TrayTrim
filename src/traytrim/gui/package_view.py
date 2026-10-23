@@ -86,11 +86,12 @@ class PackageView(ReportPage):
 
     # States
 
-    def show_idle(self, progress: str = "") -> None:
+    def show_idle(self, progress: str = "", done: int = 0, total: int = 0) -> None:
         """Nothing selected; `progress` says what's being worked out meanwhile."""
         self.report = None
         body = "Pick a package on the left to see what's in it and what needs it."
-        self.show_message("Nothing selected", f"{body}\n\n{progress}" if progress else body)
+        self.show_message("Nothing selected", f"{body}\n\n{progress}" if progress else body,
+                          bool(progress), done, total)
 
     def clear_progress(self) -> None:
         """The background work is done: the idle message loses its progress line (any other
@@ -104,7 +105,7 @@ class PackageView(ReportPage):
 
     def show_loading(self, title: str) -> None:
         self.report = None
-        self.show_message(title, "Reading the package.")
+        self.show_message(title, "Reading the package.", loading=True)
 
     def show_report(self, report: PackageReport) -> None:
         """A package, read just now. What needs it is worked out again every time (the index
@@ -127,7 +128,7 @@ class PackageView(ReportPage):
         if self.report is not None and self._users is None and not self._failed:
             self.verdict.show_working(text, line, done, total)
         elif self.report is None and self._idle():
-            self.show_idle(line)
+            self.show_idle(line, done, total)
 
     def set_usage(self, path: Path, users: list[TrayItem], dependents: list[Dependent],
                   unreadable: list[Path] | None = None, tray_read: bool = True,

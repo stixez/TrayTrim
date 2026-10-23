@@ -1,7 +1,12 @@
-"""Build the export: one package with exactly the planned resources (stored bytes copied
-unchanged), the tray files of the household, lot or room (or of several, sharing the one
-package), a README and a report, zipped. Then verify it, and
-optionally prepare an in-game test kit.
+"""Build the export: one package per CC item with exactly the resources it needs (stored bytes
+copied unchanged), named the way creators name theirs ("Nivelle_yfTop_HalterBackZip_Black
+.package"), the tray files of the household, lot or room (or of several, sharing the packages),
+and a README that says how to install it, zipped. Then verify it, and optionally prepare an
+in-game test kit.
+
+Each resource goes into the package of the CC item that needs it; what several items need (a
+mesh two recolors share) goes into one shared package (package_groups). So every file is in the
+export once, in one package only, and deleting one item's package never breaks another item.
 
 Files: everything is built in a hidden staging folder inside the chosen output folder and only
 moved into place, as the zip and the test kit folder, once all of it succeeded; a failure or a
@@ -25,20 +30,21 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from collections.abc import Callable
 
-from traytrim import __version__, dbpf, restypes
-from traytrim.dbpf import PackageWriter
+from traytrim import __version__, dbpf
+from traytrim.dbpf import PackageWriter, ResourceKey
 from traytrim.index import ResourceIndex
+from traytrim.names import ItemName, cas_file_stem, item_names
 from traytrim.paths import config_dir, documents_candidates
-from traytrim.plan import Cancelled, Plan, open_packages
-from traytrim.resolve import GameplayMod, LocatedRef, summarize
-from traytrim.tray import HouseholdContents, TrayItem
-from traytrim.units import human_size
-from traytrim.verify import Verification, verify_export
+from traytrim.plan import Cancelled, Plan, PlannedResource, open_packages
+from traytrim.resolve import GameplayMod, LocatedRef, Where, summarize
+from traytrim.tray import HouseholdContents, TrayItem, TrayRef
+from traytrim.verify import Verification, packages_digest, verify_export
 
 # progress(step, done, total): step is "package", "verify" or "zip".
 Progress = Callable[[str, int, int], None]
 
 TEST_BACKUP = "Mods_TrayTrim_backup"
+SIMS_FOLDER = "Documents/Electronic Arts/The Sims 4"
 
 
 class ExportError(Exception):
@@ -57,8 +63,8 @@ class ExportOptions:
 @dataclass
 class ExportResult:
     zip_path: Path
-    package_name: str
-    package_size: int
+    packages: list[str]            # file names in Mods/, one per CC item
+    package_size: int              # all of them together
     zip_size: int
     verification: Verification
     test_kit: Path | None
@@ -67,7 +73,7 @@ class ExportResult:
 
 @dataclass
 class Part:
-    """One tray item in an export. An export holds one, or several sharing one package."""
+    """One tray item in an export. An export holds one, or several sharing their packages."""
     item: TrayItem
     contents: HouseholdContents
     sim_ids: set[int]
@@ -91,11 +97,98 @@ def bundle_title(parts: list[Part]) -> str:
     return f"{names[0]} and {len(names) - 1} more"
 
 
-def safe_name(text: str, fallback: str = "Household") -> str:
+def safe_name(text: str, fallback: str = "Household", limit: int = 60) -> str:
     """A file-name-safe version of a Sim or household name: "Camille Moreau" -> Camille_Moreau."""
     cleaned = re.sub(r"[^\w\-]+", "_", text, flags=re.UNICODE).strip("_")
     cleaned = re.sub(r"_+", "_", cleaned)
-    return cleaned[:60] or fallback
+    return cleaned[:limit].strip("_") or fallback
+
+
+# Short enough that the game's folder, a subfolder or two in Mods and the name stay within
+# Windows' 260-character paths.
+STEM_LIMIT = 64
+
+
+# Ends every item's package name. The names follow the creators' own, so without it a trimmed
+# package could share its name with the creator's whole package in the recipient's Mods, and
+# copying it in would replace that (and every other item in it). It also keeps names like
+# "Aux" or "Con", which Windows opens as a device, from being a whole file name.
+SUFFIX = "_TT"
+
+
+def package_stem(name: ItemName | None, fallback: str) -> str:
+    """The file name, without .package, of one CC item's package. A CAS part keeps the name
+    its creator gave it, without the date stamp ("Nivelle_yfTop_HalterBackZip_SolidBlack_TT");
+    objects and build items use their catalog name ("Driftwood_Rattan_Chair_TT")."""
+    text = ""
+    if name is not None:
+        if name.creator and name.raw:
+            text = cas_file_stem(name.raw)
+        else:
+            text = name.title or name.raw
+    stem = (safe_name(text, "", limit=STEM_LIMIT)
+            or safe_name(fallback, "Item", limit=STEM_LIMIT))
+    return stem + SUFFIX
+
+
+SHARED = None  # package_groups' key for the files several CC items need
+
+
+def package_groups(plan: Plan) -> dict[TrayRef | None, list[PlannedResource]]:
+    """Which package each planned file goes into: the one of the CC item that needs it, or
+    (SHARED) a package of its own when several items need it, like a mesh two recolors use.
+    Then each item's package works without the other items' packages: deleting one CC item's
+    package never breaks another."""
+    children: dict[ResourceKey, set[ResourceKey]] = {}
+    for res in plan.resources.values():
+        for parent in res.parents:
+            children.setdefault(parent, set()).add(res.key)
+    needed_by: dict[ResourceKey, set[TrayRef]] = {}
+    for ref in plan.refs:
+        if ref.where is not Where.CC or ref.ref in plan.excluded:
+            continue
+        stack = [plan.aliases.get(k, k) for k in ref.keys]
+        seen: set[ResourceKey] = set()
+        while stack:
+            key = stack.pop()
+            if key in seen or key not in plan.resources:
+                continue
+            seen.add(key)
+            needed_by.setdefault(key, set()).add(ref.ref)
+            stack.extend(children.get(key, ()))
+    groups: dict[TrayRef | None, list[PlannedResource]] = {}
+    for res in plan.resources.values():
+        who = needed_by.get(res.key) or {res.owner}
+        groups.setdefault(next(iter(who)) if len(who) == 1 else SHARED, []).append(res)
+    return groups
+
+
+def package_names(groups: dict[TrayRef | None, list[PlannedResource]],
+                  names: dict[TrayRef, ItemName], shared: str = "Shared"
+                  ) -> dict[TrayRef | None, str]:
+    """Each package's file name, unique ignoring case (as Windows and macOS compare file
+    names, and as Check a zip unpacks them: casefold, so "Straße" and "Strasse" are one). An
+    item without a name is named after the package it comes from and its id; the shared
+    package after the export (`shared`)."""
+    out: dict[TrayRef | None, str] = {}
+    taken: set[str] = set()
+
+    def unique(stem: str) -> str:
+        candidate, n = stem, 1
+        while candidate.casefold() in taken:
+            n += 1
+            candidate = f"{stem}_{n}"
+        taken.add(candidate.casefold())
+        return f"{candidate}.package"
+
+    for owner in sorted((o for o in groups if o is not SHARED),
+                        key=lambda o: (o.kind.value, o.instance)):
+        first = min(groups[owner], key=lambda r: r.key)
+        fallback = f"{Path(first.copy.rel).stem}_{owner.instance:016X}"
+        out[owner] = unique(package_stem(names.get(owner), fallback))
+    if SHARED in groups:
+        out[SHARED] = unique(safe_name(shared, "Shared", limit=STEM_LIMIT))
+    return out
 
 
 def default_base_name(item: TrayItem, contents: HouseholdContents, sim_ids: set[int]) -> str:
@@ -163,23 +256,31 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
                  progress: Progress | None = None,
                  cancel: threading.Event | None = None, item_name: str = "") -> ExportResult:
     """Export tray items whose CC is planned together (`refs` and `plan` cover all of them)
-    into one zip with one package. With no parts, `refs` is one CC item named `item_name`."""
+    into one zip, one package per CC item. With no parts, `refs` is one CC item named
+    `item_name`."""
     out_dir = options.out_dir
     reason = forbidden_reason(out_dir, options.user_dir, options.game_dir)
     if reason:
         raise ExportError(reason)
     out_dir.mkdir(parents=True, exist_ok=True)
     base = options.base_name
-    package_name = f"{base}_TrayTrim.package"
     stage = Path(tempfile.mkdtemp(prefix=".traytrim-", dir=out_dir))
     try:
         content = stage / "zip"
-        package_path = content / "Mods" / package_name
-        package_path.parent.mkdir(parents=True)
-        _write_package(package_path, plan, progress, cancel)
+        mods_dir = content / "Mods"
+        mods_dir.mkdir(parents=True)
+        names = item_names(plan.refs, cancel)
+        if cancel is not None and cancel.is_set():
+            raise Cancelled
+        if not parts and item_name and refs and refs[0].ref not in names:
+            names[refs[0].ref] = ItemName(item_name, "", item_name)
+        groups = package_groups(plan)
+        file_names = package_names(groups, names, f"{base}_Shared")
+        package_paths = _write_packages(mods_dir, groups, file_names, progress, cancel)
+        shared = file_names.get(SHARED)
 
         verification = verify_export(
-            package_path, plan, refs, index,
+            package_paths, plan, refs, index,
             (lambda d, t: progress("verify", d, t)) if progress else None, cancel,
             from_tray=bool(parts))
 
@@ -190,23 +291,19 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
             for f in part.item.files:
                 shutil.copy2(f, tray_dir / f.name)
 
-        if parts:
-            summary = summarize(refs)
-            report = _report(parts, plan, summary, gameplay, verification, package_name)
-            readme = _readme(parts, plan, summary, gameplay, verification, package_name)
-        else:
-            report = _item_report(item_name, plan, verification, package_name)
-            readme = _item_readme(item_name, plan, verification, package_name)
-        (content / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        packs = summarize(refs).packs if parts else _dependency_packs(plan)
+        readme = (_readme(parts, gameplay, packs, shared) if parts
+                  else _item_readme(item_name, packs))
         (content / "README.txt").write_text(readme, encoding="utf-8")
 
         staged_kit = None
         if options.test_kit and parts:
             staged_kit = stage / "kit"
-            _test_kit(staged_kit, package_path, tray_dir, options.user_dir, parts)
+            _test_kit(staged_kit, mods_dir, tray_dir, options.user_dir, parts)
 
         staged_zip = stage / "export.zip"
-        _write_zip(content, staged_zip, progress, cancel)
+        _write_zip(content, staged_zip, progress, cancel,
+                   _zip_comment(parts, item_name, packs, gameplay, package_paths))
         if cancel is not None and cancel.is_set():
             raise Cancelled
 
@@ -220,7 +317,8 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
             except OSError:
                 zip_path.unlink(missing_ok=True)
                 raise
-        result = ExportResult(zip_path, package_name, package_path.stat().st_size,
+        result = ExportResult(zip_path, [p.name for p in package_paths],
+                              sum(p.stat().st_size for p in package_paths),
                               zip_path.stat().st_size, verification, kit, gameplay)
     finally:
         shutil.rmtree(stage, ignore_errors=True)
@@ -228,37 +326,86 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
     return result
 
 
-def _write_package(path: Path, plan: Plan, progress: Progress | None,
-                   cancel: threading.Event | None) -> None:
-    # Grouped by source package so each one is opened once; keys sorted within it.
-    resources = sorted(plan.resources.values(), key=lambda r: (str(r.copy.path), r.key))
-    with open_packages() as sources, PackageWriter(path) as writer:
-        for done, res in enumerate(resources, 1):
-            if cancel is not None and cancel.is_set():
-                raise Cancelled
-            entry = res.copy.entry
-            # The index may be older than the package: re-check the entry against the
-            # package's own index before copying from it.
-            try:
-                current = sources.get(res.copy.path).find(res.key)
-            except (dbpf.DbpfError, OSError) as e:
-                raise ExportError(f"Couldn't read {res.copy.rel}: {e}") from None
-            if current is None or (current.offset, current.file_size, current.compression) != (
-                    entry.offset, entry.file_size, entry.compression):
-                raise ExportError(
-                    f"{res.copy.rel} changed since TrayTrim indexed it. Let the index refresh "
-                    "(it does at start, or choose Try again in the status bar), then export "
-                    "again.")
-            writer.add_raw(res.key, sources.read_raw(res.copy), entry.compression,
-                           entry.mem_size)
-            if progress and (done % 20 == 0 or done == len(resources)):
-                progress("package", done, len(resources))
+def _write_packages(mods_dir: Path, groups: dict[TrayRef | None, list[PlannedResource]],
+                    file_names: dict[TrayRef | None, str], progress: Progress | None,
+                    cancel: threading.Event | None) -> list[Path]:
+    """The packages of package_groups() in mods_dir, keys sorted within each; returns their
+    paths, sorted by name. Written in the order of the packages they're copied from, so a big
+    merge several items come from stays open instead of being opened again and again."""
+    total, done = sum(len(r) for r in groups.values()), 0
+    order = sorted(groups, key=lambda g: min(str(r.copy.path) for r in groups[g]))
+    paths: list[Path] = []
+    with open_packages() as sources:
+        for group in order:
+            resources = groups[group]
+            path = mods_dir / file_names[group]
+            with PackageWriter(path) as writer:
+                for res in sorted(resources, key=lambda r: r.key):
+                    if cancel is not None and cancel.is_set():
+                        raise Cancelled
+                    _copy_resource(sources, writer, res)
+                    done += 1
+                    if progress and (done % 20 == 0 or done == total):
+                        progress("package", done, total)
+            paths.append(path)
+    return sorted(paths, key=lambda p: p.name.lower())
+
+
+def _copy_resource(sources, writer: PackageWriter, res: PlannedResource) -> None:
+    entry = res.copy.entry
+    # The index may be older than the package: re-check the entry against the package's own
+    # index before copying from it.
+    try:
+        current = sources.get(res.copy.path).find(res.key)
+    except (dbpf.DbpfError, OSError) as e:
+        raise ExportError(f"Couldn't read {res.copy.rel}: {e}") from None
+    if current is None or (current.offset, current.file_size, current.compression) != (
+            entry.offset, entry.file_size, entry.compression):
+        raise ExportError(
+            f"{res.copy.rel} changed since TrayTrim indexed it. Let the index refresh (it does "
+            "at start, or choose Try again in the status bar), then export again.")
+    writer.add_raw(res.key, sources.read_raw(res.copy), entry.compression, entry.mem_size)
+
+
+def _zip_comment(parts: list[Part], item_name: str, packs: list[str],
+                 gameplay: list[GameplayMod], packages: list[Path]) -> bytes:
+    """What Check a zip shows about an export that the files in it can't tell (read back with
+    verify.read_zip_comment): its name, the game packs it needs, the gameplay mods it can't
+    include, and its packages with how many files each holds (verify.record_check compares
+    them). Kept in the zip's comment, not in a file, so the recipient unpacks nothing but the
+    export. A zip comment holds at most 64 KB: when the list of packages doesn't fit (more
+    than a thousand or so), a digest of it does, which still tells any change apart."""
+    files = {path.name: len(dbpf.read_index(path)[1]) for path in packages}
+    meta = {"traytrim": __version__, "name": bundle_title(parts) if parts else item_name,
+            "kind": _kind(parts) if parts else "item", "game_packs": packs,
+            "gameplay_mods": [m.rel for m in gameplay], "packages": files}
+    data = _json_bytes(meta)
+    if len(data) > 0xFFFF:
+        meta["packages_digest"] = packages_digest(files)
+        del meta["packages"]
+        data = _json_bytes(meta)
+    while len(data) > 0xFFFF and meta["gameplay_mods"]:  # hundreds of long mod paths
+        meta["gameplay_mods"] = meta["gameplay_mods"][:len(meta["gameplay_mods"]) // 2]
+        data = _json_bytes(meta)
+    return data if len(data) <= 0xFFFF else b""
+
+
+def _json_bytes(meta: dict) -> bytes:
+    # UTF-8 as it is: escaped, a name in another script takes six bytes a letter.
+    return json.dumps(meta, separators=(",", ":"), ensure_ascii=False).encode()
+
+
+def _dependency_packs(plan: Plan) -> list[str]:
+    """Game packs the planned CC takes meshes or textures from, base game last."""
+    packs = set().union(*plan.from_game.values()) if plan.from_game else set()
+    return sorted(packs - {"base"}) + (["base"] if "base" in packs else [])
 
 
 def _write_zip(content: Path, zip_path: Path, progress: Progress | None,
-               cancel: threading.Event | None) -> None:
+               cancel: threading.Event | None, comment: bytes = b"") -> None:
     files = sorted(p for p in content.rglob("*") if p.is_file())
     with zipfile.ZipFile(zip_path, "w") as z:
+        z.comment = comment
         for done, f in enumerate(files, 1):
             if cancel is not None and cancel.is_set():
                 raise Cancelled
@@ -273,177 +420,52 @@ def _sim_names(contents: HouseholdContents, sim_ids: set[int]) -> list[str]:
     return [s.sim.name or "Unnamed Sim" for s in contents.sims if s.sim.sim_id in sim_ids]
 
 
-def _packs_text(packs: list[str]) -> str:
-    return ", ".join("base game" if p == "base" else p for p in packs) or "none"
-
-
-def _part_info(part: Part) -> dict:
-    return {"name": part_name(part), "kind": part.kind, "tray_id": part.item.id_text,
-            "sims": (_sim_names(part.contents, part.sim_ids) if part.kind == "household"
-                     else [])}
-
-
 def _kind(parts: list[Part]) -> str:
     return parts[0].kind if len(parts) == 1 else "bundle"
 
 
-def _files(plan: Plan) -> list[dict]:
-    return [{"key": str(r.key), "type": restypes.name(r.key.type), "source": r.copy.rel,
-             "bytes": r.size, "via": r.via}
-            for r in sorted(plan.resources.values(), key=lambda r: r.key)]
+_ENABLE_CC = ("In the game, turn on Game Options > Other > Enable Custom Content and Mods, "
+              "then restart the game.")
 
 
-def _dependency_packs(plan: Plan) -> list[str]:
-    """Game packs the planned CC takes meshes or textures from, base game last."""
-    packs = set().union(*plan.from_game.values()) if plan.from_game else set()
-    return sorted(packs - {"base"}) + (["base"] if "base" in packs else [])
+def _packs_line(packs: list[str]) -> list[str]:
+    needed = [p for p in packs if p != "base"]
+    return [f"It needs these game packs: {', '.join(needed)}.", ""] if needed else []
 
 
-def _conflicts(plan: Plan) -> list[dict]:
-    return [{"key": str(c.key), "used": c.copy.rel, "copies": [h.rel for h in c.copies]}
-            for c in plan.conflicts]
-
-
-def _missing_files(plan: Plan) -> list[dict]:
-    return [{"key": str(k), "needed_by": sorted(str(p) for p in parents)}
-            for k, parents in plan.missing.items()]
-
-
-def _checks(verification: Verification) -> list[dict]:
-    return [{"check": c.name, "passed": c.passed, "detail": c.detail, "problems": c.problems}
-            for c in verification.checks]
-
-
-def _report(parts: list[Part], plan: Plan, summary, gameplay, verification,
-            package_name) -> dict:
-    first = _part_info(parts[0])
-    return {
-        "traytrim": __version__,
-        "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "name": bundle_title(parts),
-        "kind": _kind(parts),
-        "tray_id": first["tray_id"] if len(parts) == 1 else None,
-        "sims": first["sims"] if len(parts) == 1 else [],
-        "items": [_part_info(p) for p in parts],
-        "package": package_name,
-        "package_bytes": plan.export_size,
-        "whole_packages_bytes": plan.whole_size,
-        "files": _files(plan),
-        "left_out": sorted(f"{r.kind.value}:{r.instance:016X}" for r in plan.excluded),
-        "game_packs": summary.packs,
-        "conflicts": _conflicts(plan),
-        "default_replacements": [{"key": str(d.key), "source": d.copy.rel}
-                                 for d in plan.default_replacements],
-        "missing_files": _missing_files(plan),
-        "not_installed_items": [f"{r.ref.kind.value}:{r.ref.instance:016X}"
-                                for r in summary.missing],
-        "gameplay_mods": [m.rel for m in gameplay],
-        "verification": _checks(verification),
-    }
-
-
-def _item_report(name: str, plan: Plan, verification, package_name) -> dict:
-    return {
-        "traytrim": __version__,
-        "exported": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "name": name,
-        "kind": "item",
-        "items": [],
-        "package": package_name,
-        "package_bytes": plan.export_size,
-        "whole_packages_bytes": plan.whole_size,
-        "files": _files(plan),
-        "game_packs": _dependency_packs(plan),
-        "conflicts": _conflicts(plan),
-        "missing_files": _missing_files(plan),
-        "verification": _checks(verification),
-    }
-
-
-def _item_readme(name: str, plan: Plan, verification, package_name) -> str:
-    lines = [f"{name}: exported with TrayTrim {__version__}", "",
-             "How to install",
-             f"  Copy Mods/{package_name} into Documents/Electronic Arts/The Sims 4/Mods",
-             "",
-             "What's in the package",
-             f"  This one item and everything it needs: {len(plan.resources):,} files "
-             f"({human_size(plan.export_size)}), taken from {len(plan.source_packages):,} CC "
-             "packages.",
-             f"  Game packs it uses content from: {_packs_text(_dependency_packs(plan))}."]
-    if plan.missing:
-        lines += ["",
-                  "Missing before export",
-                  f"  {len(plan.missing)} files it needs weren't installed when this was "
-                  "exported, so they're not included."]
-    lines += ["", "Checked after export"]
-    lines += [f"  [{'ok' if c.passed else 'FAILED'}] {c.name}" for c in verification.checks]
-    lines += ["",
-              "Exports are meant for your own backups and transfers, or for CC you have the",
-              "rights to share. Many creators don't allow re-uploading their CC.",
-              ""]
+def _item_readme(name: str, packs: list[str]) -> str:
+    lines = [f"How to install {name}", "", *_packs_line(packs),
+             f"1. Copy every .package file in Mods/ into {SIMS_FOLDER}/Mods",
+             f"2. {_ENABLE_CC}", ""]
     return "\n".join(lines)
 
 
-def _readme(parts: list[Part], plan: Plan, summary, gameplay, verification,
-            package_name) -> str:
+def _readme(parts: list[Part], gameplay: list[GameplayMod], packs: list[str],
+            shared: str | None = None) -> str:
     kind = _kind(parts)
-    what = {"household": "these Sims use", "lot": "this lot uses",
-            "room": "this room uses", "bundle": "they use"}[kind]
-    lines = [f"{bundle_title(parts)}: exported with TrayTrim {__version__}", ""]
-    if kind == "household":
-        lines += [f"Sims: {', '.join(_sim_names(parts[0].contents, parts[0].sim_ids))}", ""]
-    elif kind == "bundle":
-        lines += ["Contains"]
-        for p in parts:
-            sims = _sim_names(p.contents, p.sim_ids) if p.kind == "household" else []
-            lines.append(f"  {p.kind.capitalize()}: {part_name(p)}"
-                         + (f" ({', '.join(sims)})" if sims else ""))
-        lines.append("")
     find = "them" if kind == "bundle" else f"the {kind}"
-    lines += [
-        "How to install",
-        "  1. Copy the files in Tray/ into Documents/Electronic Arts/The Sims 4/Tray",
-        f"  2. Copy Mods/{package_name} into Documents/Electronic Arts/The Sims 4/Mods",
-        f"  3. Start the game and find {find} in the Library.",
-        "",
-        "What's in the package",
-        f"  Only the custom content {what}: {len(plan.resources):,} files "
-        f"({human_size(plan.export_size)}), taken from {len(plan.source_packages):,} CC "
-        "packages.",
-        f"  Game packs it uses content from: {_packs_text(summary.packs)}.",
-    ]
-    if plan.default_replacements:
-        lines += ["",
-                  "Default replacements included",
-                  "  These change an item of the game itself, for every Sim:"]
-        lines += [f"    {d.copy.rel}" for d in plan.default_replacements]
+    lines = [f"How to install {bundle_title(parts)}", "", *_packs_line(packs),
+             f"1. Copy every file in Tray/ into {SIMS_FOLDER}/Tray",
+             f"2. Copy every .package file in Mods/ into {SIMS_FOLDER}/Mods"
+             + (f" ({shared} holds what several items share; keep it with them)"
+                if shared else ""),
+             f"3. {_ENABLE_CC}",
+             f"4. Find {find} in the Library. Tick Include Custom Content in its filters if "
+             f"{'they don' if kind == 'bundle' else 'it doesn'}'t show up."]
     if gameplay:
-        lines += ["",
-                  "Also needed, not included",
-                  "  It uses traits, moods or other gameplay content from these mods.",
-                  "  They can't be trimmed; install the whole mods from their creators:"]
-        lines += [f"    {m.rel}" for m in gameplay]
-    if summary.missing or plan.missing:
-        lines += ["",
-                  "Missing before export",
-                  f"  {len(summary.missing)} items and {len(plan.missing)} files the CC "
-                  "needs weren't installed when this was exported, so they're not included."]
-    lines += ["",
-              "Checked after export"]
-    lines += [f"  [{'ok' if c.passed else 'FAILED'}] {c.name}" for c in verification.checks]
-    lines += ["",
-              "Exports are meant for your own backups and transfers, or for CC you have the",
-              "rights to share. Many creators don't allow re-uploading their CC.",
-              ""]
+        lines += ["5. Also install these mods from their creators (they can't be trimmed, "
+                  "so they're not included):"]
+        lines += [f"     {m.rel}" for m in gameplay]
+    lines.append("")
     return "\n".join(lines)
 
 
-def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | None,
+def _test_kit(kit: Path, mods_dir: Path, tray_dir: Path, user_dir: Path | None,
               parts: list[Part]) -> None:
-    (kit / "Mods").mkdir(parents=True)
-    shutil.copy2(package_path, kit / "Mods" / package_path.name)
+    kit.mkdir()
+    shutil.copytree(mods_dir, kit / "Mods")
     shutil.copytree(tray_dir, kit / "Tray")
-    sims = user_dir or Path("Documents/Electronic Arts/The Sims 4")
+    sims = user_dir or Path(SIMS_FOLDER)
     kind = _kind(parts)
     one = parts[0]
     names = ", ".join(_sim_names(one.contents, one.sim_ids))
@@ -452,14 +474,14 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
         f"In-game test for {bundle_title(parts)}" + (f" ({names})" if kind == "household"
                                                       else ""),
         "",
-        "This checks the export in the game with nothing but the exported package installed.",
+        "This checks the export in the game with nothing but the exported packages installed.",
         "TrayTrim never touches your Mods folder; these steps (or the two .bat files on",
         "Windows) do, and they put everything back.",
         "",
         "1. Close The Sims 4.",
         f"2. Rename your Mods folder ({sims / 'Mods'}) to {TEST_BACKUP}.",
         "3. Make a new, empty Mods folder there, and copy into it:",
-        f"     - {package_path.name} from this kit's Mods folder",
+        "     - every .package file in this kit's Mods folder",
         f"     - Resource.cfg from {TEST_BACKUP}",
         f"4. Start the game, load {them} from the Library and compare with how it looks",
         f"   with all your mods. {it[0].upper() + it[1:]} already in your Tray.",
@@ -468,20 +490,23 @@ def _test_kit(kit: Path, package_path: Path, tray_dir: Path, user_dir: Path | No
         "",
         "On Windows, 1_start_test.bat does steps 2 and 3, and 2_end_test.bat does step 5.",
         "Both refuse to do anything while the game is running, and 2_end_test.bat only",
-        "touches the Mods folder if it holds nothing but the two test files.",
+        "touches the Mods folder if it holds nothing but the test files.",
         "",
     ]
     (kit / "HOW_TO_TEST.txt").write_text("\n".join(steps), encoding="utf-8")
     if sys.platform == "win32":
-        _write_bats(kit, Path(sims), package_path.name, kind)
+        _write_bats(kit, Path(sims), kind)
 
 
-_RUNNING_CHECK = """tasklist /FI "IMAGENAME eq TS4_x64.exe" | find /I "TS4_x64.exe" >nul && goto running
-tasklist /FI "IMAGENAME eq TS4_DX9_x64.exe" | find /I "TS4_DX9_x64.exe" >nul && goto running
+# Windows' own tasklist and find, by full path: with Git or MSYS tools first on PATH, "find"
+# is a different program, the check fails and the scripts would go on while the game runs.
+_RUNNING_CHECK = """set "SYS=%SystemRoot%\\System32"
+"%SYS%\\tasklist.exe" /FI "IMAGENAME eq TS4_x64.exe" | "%SYS%\\find.exe" /I "TS4_x64.exe" >nul && goto running
+"%SYS%\\tasklist.exe" /FI "IMAGENAME eq TS4_DX9_x64.exe" | "%SYS%\\find.exe" /I "TS4_DX9_x64.exe" >nul && goto running
 """
 
 
-def _write_bats(kit: Path, sims: Path, package: str, kind: str = "household") -> None:
+def _write_bats(kit: Path, sims: Path, kind: str = "household") -> None:
     load = ("load the household in Create a Sim" if kind == "household"
             else "load them from the Library" if kind == "bundle"
             else f"place the {kind} from the Library")
@@ -491,7 +516,7 @@ setlocal
 set "SIMS={sims}"
 set "MODS=%SIMS%\\Mods"
 set "BACKUP=%SIMS%\\{TEST_BACKUP}"
-set "PKG={package}"
+set "KIT=%~dp0Mods"
 {_RUNNING_CHECK}"""
     start = head + f"""if exist "%BACKUP%\\" (
   echo A test is already set up: {TEST_BACKUP} exists. Run 2_end_test.bat first.
@@ -501,8 +526,8 @@ if not exist "%MODS%\\" (
   echo No Mods folder in "%SIMS%". Nothing was changed.
   goto end
 )
-if not exist "%~dp0Mods\\%PKG%" (
-  echo This kit's package is missing: "%~dp0Mods\\%PKG%". Nothing was changed.
+if not exist "%KIT%\\*.package" (
+  echo This kit's packages are missing from "%KIT%". Nothing was changed.
   goto end
 )
 ren "%MODS%" {TEST_BACKUP} || (
@@ -513,7 +538,7 @@ mkdir "%MODS%" || goto undo
 if exist "%BACKUP%\\Resource.cfg" (
   copy "%BACKUP%\\Resource.cfg" "%MODS%\\" >nul || goto undo
 )
-copy "%~dp0Mods\\%PKG%" "%MODS%\\" >nul || goto undo
+copy "%KIT%\\*.package" "%MODS%\\" >nul || goto undo
 echo The test Mods folder is ready. Start the game and {load}.
 echo When you're done, close the game and run 2_end_test.bat.
 goto end
@@ -535,10 +560,10 @@ pause
   echo No test is set up: there is no {TEST_BACKUP} folder. Nothing was changed.
   goto end
 )
-rem Only touch Mods if it holds nothing but the two files 1_start_test.bat put there.
+rem Only touch Mods if it holds nothing but the files 1_start_test.bat put there.
 set "OTHER="
 for /f "delims=" %%F in ('dir /b /a "%MODS%" 2^>nul') do (
-  if /I not "%%F"=="%PKG%" if /I not "%%F"=="Resource.cfg" set "OTHER=1"
+  if /I not "%%F"=="Resource.cfg" if not exist "%KIT%\\%%F" set "OTHER=1"
 )
 if defined OTHER (
   echo "%MODS%" holds files the test didn't put there, so nothing was changed.
@@ -546,7 +571,7 @@ if defined OTHER (
   echo after checking it holds nothing you need.
   goto end
 )
-if exist "%MODS%\\%PKG%" del /Q "%MODS%\\%PKG%"
+for %%F in ("%KIT%\\*.package") do if exist "%MODS%\\%%~nxF" del /Q "%MODS%\\%%~nxF"
 if exist "%MODS%\\Resource.cfg" del /Q "%MODS%\\Resource.cfg"
 rmdir "%MODS%" 2>nul
 if exist "%MODS%\\" (

@@ -102,6 +102,14 @@ def readable_cas_name(raw: str) -> ItemName:
     return ItemName(" ".join(words), " ".join(creators).strip(" ."), raw)
 
 
+def cas_file_stem(raw: str) -> str:
+    """A CAS part's internal name as a file name, the way creators name their packages:
+    "A_A_yfTop_HalterBackZip_SolidBlack_2026..." -> "A_yfTop_HalterBackZip_SolidBlack" (no
+    date stamp, no part repeated right after itself)."""
+    parts = [p for p in raw.split("_") if p and not _STAMP.match(p)]
+    return "_".join(p for i, p in enumerate(parts) if i == 0 or p != parts[i - 1])
+
+
 def clean(text: str) -> str:
     """Catalog names sometimes carry markup (<font color=...>); players see the text only."""
     return " ".join(_TAG.sub("", text).split())
@@ -137,35 +145,36 @@ def item_names(refs: list[LocatedRef], cancel=None) -> dict[TrayRef, ItemName]:
     """Names for the CC items among refs that have one (objects, build items, CAS parts),
     read from the package each one is used from."""
     out: dict[TrayRef, ItemName] = {}
-    packages: dict[Path, _Package | None] = {}
+    wanted = [r for r in refs if r.where is Where.CC and r.used is not None
+              and r.ref.kind in (RefKind.OBJECT, RefKind.BUILD, RefKind.CAS_PART)]
+    # A package at a time: a big household's CC comes from more packages than a process may
+    # have open at once.
+    wanted.sort(key=lambda r: str(r.used.path))
+    path: Path | None = None
+    pkg: _Package | None = None
     try:
-        for r in refs:
+        for r in wanted:
             if cancel is not None and cancel.is_set():
                 break
-            if r.where is not Where.CC or r.used is None:
-                continue
-            kind = r.ref.kind
-            if kind not in (RefKind.OBJECT, RefKind.BUILD, RefKind.CAS_PART):
-                continue
-            path = r.used.path
-            if path not in packages:
+            if r.used.path != path:
+                if pkg is not None:
+                    pkg.pkg.close()
+                path = r.used.path
                 try:
-                    packages[path] = _Package(path)
+                    pkg = _Package(path)
                 except (dbpf.DbpfError, OSError):
-                    packages[path] = None
-            pkg = packages[path]
+                    pkg = None
             if pkg is None:
                 continue
             try:
-                name = _name(r, kind, pkg)
+                name = _name(r, r.ref.kind, pkg)
             except (dbpf.DbpfError, struct.error, OSError):
                 continue
             if name is not None:
                 out[r.ref] = name
     finally:
-        for pkg in packages.values():
-            if pkg is not None:
-                pkg.pkg.close()
+        if pkg is not None:
+            pkg.pkg.close()
     return out
 
 

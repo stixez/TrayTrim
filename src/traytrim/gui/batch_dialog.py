@@ -20,11 +20,22 @@ from traytrim.gui.gallery import subtitle
 from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import RADIUS, SPACE
-from traytrim.gui.widgets import ElidedLabel, Notice, SimChip, SupportLine, label, link_button
+from traytrim.gui.widgets import (ElidedLabel, Notice, SimChip, Spinner, SupportLine, label,
+                                  link_button)
 from traytrim.index import ResourceIndex
 from traytrim.settings import Settings
 from traytrim.tray import TrayItem
 from traytrim.units import human_size
+
+
+def _result_tip(result) -> str:
+    """Where an export is, and which of its checks failed."""
+    lines = [str(result.zip_path)]
+    for check in result.verification.checks:
+        if not check.passed:
+            lines.append(f"Failed: {check.name}")
+            lines += [f"  {p}" for p in check.problems[:5]]
+    return "\n".join(lines)
 
 
 class PickRow(QAbstractButton):
@@ -164,7 +175,7 @@ class BatchDialog(QDialog):
         outer.addWidget(self.title)
         self.intro = label(
             "Each one gets its own zip, checked like a single export, or put them together in "
-            "one zip that shares one package, like a lot with the household that lives there. "
+            "one zip that shares its packages, like a lot with the household that lives there. "
             "What you chose in the app (Sims, left-out items, copies) is kept; the rest start "
             "from the defaults.", "secondary", wrap=True)
         outer.addWidget(self.intro)
@@ -240,12 +251,12 @@ class BatchDialog(QDialog):
         self.together_chip = SimChip("Together in one zip")
         self.together_chip.setAccessibleName("Export them together in one zip")
         self.together_chip.setToolTip(
-            "One zip with all their tray files and one package with the CC of all of them; "
+            "One zip with all their tray files and the CC of all of them, a package per CC item; "
             "CC they share is in it once.")
         self.together_chip.toggled.connect(self._update_count)
         self.kit_chip = SimChip("In-game test kit")
         self.kit_chip.setAccessibleName("Also make an in-game test kit")
-        self.kit_chip.setToolTip("A folder next to each zip with only its package and steps to "
+        self.kit_chip.setToolTip("A folder next to each zip with only its packages and steps to "
                                  "try it in your game with nothing else installed.")
         chips = QHBoxLayout()
         chips.setSpacing(SPACE["s"])
@@ -282,7 +293,11 @@ class BatchDialog(QDialog):
         self.bar.setTextVisible(False)
         self.bar.setFixedHeight(4)
         self.bar.setAccessibleName("Export progress")
-        col.addWidget(self.bar)
+        row = QHBoxLayout()
+        row.setSpacing(SPACE["m"])
+        row.addWidget(Spinner(20), 0, Qt.AlignmentFlag.AlignVCenter)
+        row.addWidget(self.bar, 1, Qt.AlignmentFlag.AlignVCenter)
+        col.addLayout(row)
         buttons = QHBoxLayout()
         buttons.addStretch(1)
         self.stop_button = QPushButton("Stop")
@@ -451,7 +466,7 @@ class BatchDialog(QDialog):
                                    ("check", "success_text"))
                 else:
                     row.set_status("Saved, but a check failed", ("alert", "danger_text"))
-                row.setToolTip(str(o.result.zip_path))
+                row.setToolTip(_result_tip(o.result))
             elif o.skipped:
                 row.set_status(o.skipped, ("excluded", "text_tertiary"))
             else:
@@ -470,7 +485,7 @@ class BatchDialog(QDialog):
         if error is not None:
             where = f"{describe_error(error)}. {where}"
         self.intro.setText(where + (f" {plural(failed, 'export')} saved with a failed check: "
-                                    "open its report.json for the details." if failed else ""))
+                                    "point at it to see which one." if failed else ""))
         self._finish(saved > 0)
 
     def _show_together(self, error: Exception | None) -> None:
@@ -480,12 +495,12 @@ class BatchDialog(QDialog):
             for row in self._running:
                 row.set_status("In the zip" if ok else "Saved, a check failed",
                                ("check", "success_text") if ok else ("alert", "danger_text"))
-                row.setToolTip(str(result.zip_path))
+                row.setToolTip(_result_tip(result))
             self.title.setText("Exported together and verified" if ok
                                else "Exported together, but a check failed")
             self.intro.setText(f"{result.zip_path.name}, {human_size(result.zip_size)}, in "
-                               f"{self.out_dir}." + ("" if ok else " Open its report.json for "
-                                                     "the details."))
+                               f"{self.out_dir}." + ("" if ok else " Point at an item to see "
+                                                     "which check failed."))
         else:
             stopped = error is None
             for row in self._running:

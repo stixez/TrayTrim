@@ -240,7 +240,7 @@ def _print_plan(refs, excluded=None) -> None:
               "the app if you want them).")
     whole = plan.whole_size
     saving = percent_smaller(plan.export_size, whole)
-    print(f"\nExport: {human_size(plan.export_size)} in one package, {len(plan.resources):,} "
+    print(f"\nExport: {human_size(plan.export_size)}, a package per CC item, {len(plan.resources):,} "
           f"files from {len(plan.source_packages):,} CC packages.")
     print(f"Whole packages: {human_size(whole)} ({len(plan.packages_with_copies):,} packages)"
           + (f", {saving}." if saving else "."))

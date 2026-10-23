@@ -296,7 +296,7 @@ def test_test_kit_helper_names_the_right_screen(tmp_path):
 
     from traytrim.export import _write_bats
 
-    _write_bats(tmp_path, Path("Sims 4"), "Seaside_TrayTrim.package", "lot")
+    _write_bats(tmp_path, Path("Sims 4"), "lot")
     bat = (tmp_path / "1_start_test.bat").read_text(encoding="utf-8")
     assert "place the lot from the Library" in bat and "Create a Sim" not in bat
 
