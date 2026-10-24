@@ -210,7 +210,7 @@ class CardDelegate(QStyledItemDelegate):
 
         x = card.left() + SPACE["s"]
         width = card.width() - 2 * SPACE["s"]
-        if not included:
+        if not included:  # only the picture fades: the text keeps its contrast
             painter.setOpacity(0.4)
         thumb = QRectF(x, card.top() + SPACE["s"], width, THUMB)  # the picture centred in it
         clip = QPainterPath()
@@ -236,6 +236,7 @@ class CardDelegate(QStyledItemDelegate):
             painter.drawText(QRectF(thumb.left(), top + glyph + 6, thumb.width(), 16),
                              Qt.AlignmentFlag.AlignCenter, "No preview")
         painter.restore()
+        painter.setOpacity(1.0)
 
         y = thumb.bottom() + SPACE["s"]
         painter.setFont(theme.ui_font("caption"))
@@ -246,7 +247,7 @@ class CardDelegate(QStyledItemDelegate):
                                               int(width)))
         y += caption_m.height() + SPACE["xs"]
         painter.setFont(theme.ui_font("body"))
-        painter.setPen(QColor(p.text))
+        painter.setPen(QColor(p.text if included else p.text_secondary))
         for line in wrap_and_elide(s.title(ref), body_m, int(width), 2):
             painter.drawText(QRectF(x, y, width, body_m.lineSpacing()),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
@@ -267,7 +268,6 @@ class CardDelegate(QStyledItemDelegate):
                 right -= 16
                 painter.drawImage(QRectF(right, y + 1, 16, 16), icons.image(name, token, 16, dpr))
                 right -= SPACE["xs"]
-        painter.setOpacity(1.0)
         if not included:
             y += 18 + SPACE["xs"]
             painter.drawImage(QRectF(x, y + 1, 16, 16),
@@ -582,6 +582,7 @@ class _NameDelegate(QStyledItemDelegate):
                                      thumb.center().y() - glyph / 2, glyph, glyph),
                               icons.image(category_icon(ref), p.text_tertiary, glyph, dpr))
         painter.restore()
+        painter.setOpacity(1.0)
         x = thumb.right() + SPACE["m"]
         width = rect.right() - SPACE["s"] - x
         font = theme.ui_font("body", QFont.Weight.Medium)
@@ -689,6 +690,31 @@ class CcTable(QTreeView):
 
     def wheelEvent(self, event) -> None:  # noqa: N802
         event.ignore()  # the page scrolls
+
+    def drawRow(self, painter: QPainter, option, index: QModelIndex) -> None:  # noqa: N802
+        super().drawRow(painter, option, index)
+        current = self.currentIndex()
+        if self.hasFocus() and current.isValid() and current.row() == index.row():
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.setPen(QPen(QColor(theme.current().focus), 2))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            row = QRectF(0, option.rect.top(), self.viewport().width(), option.rect.height())
+            painter.drawRoundedRect(row.adjusted(1, 1, -1, -1), RADIUS["control"],
+                                    RADIUS["control"])
+            painter.restore()
+
+    def focusInEvent(self, event) -> None:  # noqa: N802
+        super().focusInEvent(event)
+        self.viewport().update()  # the ring spans the row, not just the current cell
+
+    def focusOutEvent(self, event) -> None:  # noqa: N802
+        super().focusOutEvent(event)
+        self.viewport().update()
+
+    def currentChanged(self, current: QModelIndex, previous: QModelIndex) -> None:  # noqa: N802
+        super().currentChanged(current, previous)
+        self.viewport().update()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         index = self.currentIndex()

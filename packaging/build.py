@@ -5,7 +5,8 @@
     python packaging/build.py --no-installer
 
 On macOS the app is dist/TrayTrim.app, on Linux dist/TrayTrim/TrayTrim. CI builds all three
-(.github/workflows/release.yml). The installer needs Inno Setup 6 (ISCC.exe on PATH, in its default folder, or in $ISCC).
+(.github/workflows/release.yml). The installer needs Inno Setup 6 (ISCC.exe on PATH, in its
+default folder, or in $ISCC).
 """
 
 from __future__ import annotations
@@ -69,6 +70,10 @@ def build_app() -> Path:
         "--specpath", str(work),
         "--paths", str(ROOT / "src"),
         "--add-data", f"{ROOT / 'src' / 'traytrim' / 'gui' / 'assets'}{sep}traytrim/gui/assets",
+        # TrayTrim's license and those of what the build bundles (Qt is LGPL).
+        "--add-data", f"{ROOT / 'LICENSE'}{sep}.",
+        "--add-data", f"{ROOT / 'THIRD_PARTY_NOTICES.md'}{sep}.",
+        "--add-data", f"{ROOT / 'LICENSES'}{sep}LICENSES",
     ]
     if sys.platform == "win32":
         args += ["--icon", str(PACKAGING / "assets" / "TrayTrim.ico"),
@@ -85,8 +90,8 @@ def build_app() -> Path:
 
 def find_iscc() -> Path | None:
     candidates = [os.environ.get("ISCC"), shutil.which("ISCC")]
-    for base in (os.environ.get("LOCALAPPDATA"), os.environ.get("ProgramFiles(x86)"),
-                 os.environ.get("ProgramFiles")):
+    for base in (os.environ.get(name) for name in ("LOCALAPPDATA", "ProgramFiles(x86)",
+                                                   "ProgramFiles")):
         if base:
             candidates.append(str(Path(base) / "Programs" / "Inno Setup 6" / "ISCC.exe"))
             candidates.append(str(Path(base) / "Inno Setup 6" / "ISCC.exe"))

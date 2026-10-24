@@ -50,6 +50,10 @@ Name: "desktopicon"; Description: "Add a desktop shortcut"; GroupDescription: "S
 
 [Files]
 Source: "..\dist\TrayTrim\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; The licenses also next to TrayTrim.exe, where people look for them (the build has them in _internal).
+Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\LICENSES\*"; DestDir: "{app}\LICENSES"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#AppName}"; Filename: "{app}\TrayTrim.exe"; AppUserModelID: "TrayTrim.TrayTrim"

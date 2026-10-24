@@ -37,13 +37,17 @@ def when_text(stamp: str, now: datetime | None = None) -> str:
 class HistoryRow(QWidget):
     def __init__(self, entry: dict, on_check: Callable[[Path], None], parent=None):
         super().__init__(parent)
-        self.zip = Path(entry.get("zip") or "")
-        name = entry.get("name") or entry.get("household") or "Unnamed"
-        kind = str(entry.get("kind") or "household").capitalize()
-        exists = self.zip.is_file()
+        def text(key: str) -> str:  # the file can be hand-edited: anything not text is unset
+            value = entry.get(key)
+            return value if isinstance(value, str) else ""
+
+        self.zip = Path(text("zip"))
+        name = text("name") or text("household") or "Unnamed"
+        kind = (text("kind") or "household").capitalize()
+        exists = bool(text("zip")) and self.zip.is_file()
         size = entry.get("bytes")
         state = ("A check failed" if entry.get("verified") is False else "Verified")
-        meta = [kind, when_text(entry.get("time", ""))]
+        meta = [kind, when_text(text("time"))]
         if isinstance(size, int):
             meta.append(human_size(size))
         meta.append(state if exists else "The zip isn't there any more")

@@ -1,0 +1,47 @@
+name: Bug report
+description: Something in TrayTrim doesn't work as it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what TrayTrim did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to see it
+      description: If it happens with one household, lot, room or package, say which kind and what's special about it.
+      placeholder: |
+        1. Open the household ...
+        2. Click Export ...
+  - type: input
+    id: version
+    attributes:
+      label: TrayTrim version
+      description: Settings > About shows it.
+      placeholder: "0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: System
+      options:
+        - Windows
+        - macOS
+        - Linux (Steam/Proton)
+        - Linux (other)
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Error details
+      description: If TrayTrim showed "TrayTrim hit a bug", paste what Copy details copied. Remove anything private, like your user name in paths.
+      render: text
+  - type: markdown
+    attributes:
+      value: Please don't attach CC packages you don't have the rights to share. A screenshot or the package's name is usually enough.

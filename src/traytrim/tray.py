@@ -537,7 +537,7 @@ def _key_message(raw: bytes):
 
     f = pb.fields_by_number(raw)
     t, g, i = pb.first_int(f, 1, 0), pb.first_int(f, 2, 0), pb.first_int(f, 3, 0)
-    if not (t and i) or t > 0xFFFFFFFF or g > 0xFFFFFFFF:
+    if not (t and i) or t > 0xFFFFFFFF or g > 0xFFFFFFFF or i > 0xFFFFFFFFFFFFFFFF:
         return None
     return ResourceKey(t, g, i)
 

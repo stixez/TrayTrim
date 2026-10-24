@@ -37,7 +37,7 @@ class Settings:
         path = path or default_path()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):  # missing, damaged, absurdly nested
             return cls()
         settings = cls()
         if not isinstance(data, dict):

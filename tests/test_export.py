@@ -289,3 +289,26 @@ def test_a_record_too_big_for_the_zip_comment_becomes_a_digest(monkeypatch):
     fewer = list(names)[1:]
     assert not record_check(meta, fewer, counts).passed  # one taken out
     assert not record_check(meta, list(names), {**counts, next(iter(counts)): 4}).passed
+
+
+def test_test_kit_without_a_sims_folder_has_no_scripts(tmp_path, household, monkeypatch):
+    # Nothing chosen and nothing found: steps only, never scripts aimed at a guessed folder.
+    monkeypatch.setattr("traytrim.export.find_user_dir", lambda: None)
+    index, item, contents, refs = household
+    result = export_household(item, contents, refs, build_plan(refs, index), [], {1},
+                              ExportOptions(tmp_path / "out", "x", True), index)
+    kit = result.test_kit
+    assert not list(kit.glob("*.bat"))
+    steps = (kit / "HOW_TO_TEST.txt").read_text(encoding="utf-8")
+    assert "Mods_TrayTrim_backup" in steps and ".bat" not in steps
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the scripts are made on Windows only")
+def test_test_kit_scripts_keep_a_percent_sign_in_the_path(tmp_path, household):
+    index, item, contents, refs = household
+    sims = tmp_path / "100% Sims"
+    result = export_household(item, contents, refs, build_plan(refs, index), [], {1},
+                              ExportOptions(tmp_path / "out", "x", True, sims), index)
+    bat = (result.test_kit / "1_start_test.bat").read_text(encoding="utf-8")
+    assert 'set "SIMS=' + str(sims).replace("%", "%%") + '"' in bat  # cmd reads %% as one %
+    assert "100%% Sims" in bat

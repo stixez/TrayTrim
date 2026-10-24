@@ -36,7 +36,7 @@ class Palette:
     surface_hover: str
     text: str
     text_secondary: str
-    text_tertiary: str   # placeholders, hints; still meets 4.5:1 on window
+    text_tertiary: str   # placeholders, hints; still 4.5:1 on every background, hover too
     divider: str         # hairlines between regions (decorative, no contrast target)
     border_strong: str   # input borders, meets 3:1
     accent: str          # primary action fill
@@ -95,7 +95,7 @@ DARK = Palette(
     surface_hover="#2E2E2E",
     text="#EDEDED",
     text_secondary="#ABABAB",
-    text_tertiary="#8F8F8F",
+    text_tertiary="#999999",
     divider="#2E2E2E",
     border_strong="#767676",
     accent="#EDEDED",

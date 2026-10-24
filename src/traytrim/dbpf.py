@@ -274,7 +274,7 @@ def decompress(raw: bytes, compression: int, mem_size: int, what: str = "resourc
             raise DbpfError(f"{what} has damaged zlib data (stream doesn't end where the "
                             f"resource does).")
     elif compression in (COMP_REFPACK, COMP_REFPACK_STREAMABLE):
-        data = refpack_decompress(raw, what)
+        data = refpack_decompress(raw, what, mem_size)
     else:
         raise DbpfError(f"{what} uses unknown compression 0x{compression:04X}.")
     if len(data) != mem_size:
@@ -282,12 +282,15 @@ def decompress(raw: bytes, compression: int, mem_size: int, what: str = "resourc
     return data
 
 
-def refpack_decompress(src: bytes, what: str = "resource") -> bytes:
+def refpack_decompress(src: bytes, what: str = "resource", expected: int | None = None) -> bytes:
     """Decompress EA RefPack (QFS).
 
     Header: flags byte, 0xFB, [compressed size if flags & 0x01], uncompressed size; sizes are
     big-endian, 4 bytes if flags & 0x80 else 3. Then a stream of control codes, each copying
     some literal bytes from the input followed by a back-reference into the output.
+
+    expected is the size the package index gives; the header has to agree with it before
+    anything is unpacked, so a damaged header can't make the output grow to gigabytes.
     """
     if len(src) < 5 or src[1] != 0xFB:
         raise DbpfError(f"{what} is not valid RefPack data.")
@@ -296,6 +299,12 @@ def refpack_decompress(src: bytes, what: str = "resource") -> bytes:
     p = 2 + (width if flags & 0x01 else 0)
     size = int.from_bytes(src[p:p + width], "big")
     p += width
+    if expected is not None and size != expected:
+        raise DbpfError(f"{what} RefPack header says {size:,} bytes, the index says "
+                        f"{expected:,}.")
+    if size > MAX_RESOURCE_SIZE:
+        raise DbpfError(f"{what} says it unpacks to {size:,} bytes, more than any Sims 4 "
+                        "resource; it's damaged or not what it claims.")
     out = bytearray()
     n = len(src)
     try:

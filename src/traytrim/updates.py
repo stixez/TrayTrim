@@ -5,6 +5,7 @@ this platform and the user decides."""
 from __future__ import annotations
 
 import json
+import platform as host
 import re
 import sys
 import urllib.error
@@ -40,11 +41,18 @@ def is_newer(latest: str, current: str | None = None) -> bool:
     return a is not None and b is not None and a > b
 
 
-def _asset_for_platform(assets: list[dict], platform: str = sys.platform) -> str | None:
+def _asset_for_platform(assets: list[dict], platform: str = sys.platform,
+                        machine: str | None = None) -> str | None:
     """The download a user of this platform wants: the installer on Windows, the app on macOS,
-    the archive on Linux (see packaging/ for the names)."""
-    suffixes = {"win32": ("-setup.exe", "-windows-portable.zip"),
-                "darwin": ("-macos-arm64.zip",)}.get(platform, ("-linux-x86_64.tar.gz",))
+    the archive on Linux (see packaging/ for the names). None when no build runs on this
+    machine (an Intel Mac, an ARM Linux): they get the release page."""
+    machine = (machine or host.machine()).lower()
+    if platform == "win32":  # x64, which Windows on ARM also runs
+        suffixes: tuple[str, ...] = ("-setup.exe", "-windows-portable.zip")
+    elif platform == "darwin":
+        suffixes = ("-macos-arm64.zip",) if machine in ("arm64", "aarch64") else ()
+    else:
+        suffixes = ("-linux-x86_64.tar.gz",) if machine in ("x86_64", "amd64") else ()
     for suffix in suffixes:
         for asset in assets:
             name, url = asset.get("name"), asset.get("browser_download_url")
@@ -53,7 +61,8 @@ def _asset_for_platform(assets: list[dict], platform: str = sys.platform) -> str
     return None
 
 
-def parse_release(data: object, platform: str = sys.platform) -> Release | None:
+def parse_release(data: object, platform: str = sys.platform,
+                  machine: str | None = None) -> Release | None:
     """The release GitHub's API describes, or None if it isn't one we can offer."""
     if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
         return None
@@ -65,7 +74,7 @@ def parse_release(data: object, platform: str = sys.platform) -> Release | None:
         page = RELEASES_PAGE
     notes = data.get("body") if isinstance(data.get("body"), str) else ""
     assets = data.get("assets") if isinstance(data.get("assets"), list) else []
-    download = _asset_for_platform([a for a in assets if isinstance(a, dict)], platform)
+    download = _asset_for_platform([a for a in assets if isinstance(a, dict)], platform, machine)
     if download is None or not download.startswith(f"https://github.com/{REPO}/"):
         download = page
     return Release(tag.lstrip("v"), page, notes.strip(), download)

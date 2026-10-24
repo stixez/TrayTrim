@@ -150,6 +150,7 @@ class MainWindow(QMainWindow):
         self._usage_gen = -1         # the generation _usage was worked out for
         self._usage_tray_stamp = None  # the Tray folder's modification time it was read at
         self._usage_task: BackgroundTask | None = None
+        self._closing = False  # stop_work ran: cancelled work isn't restarted
         self._package = None         # ModsPackageInfo shown on the right
         self._package_gen = 0
         self._package_loading = -1   # the generation still being read, if any
@@ -234,6 +235,8 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(self._search_changed)
         self._search_icon = self.search.addAction(QIcon(), QLineEdit.ActionPosition.LeadingPosition)
         self._clear_action = self.search.addAction(QIcon(), QLineEdit.ActionPosition.TrailingPosition)
+        self._search_icon.setText("Search")  # what screen readers call the icon's button
+        self._clear_action.setText("Clear search")
         self._clear_action.setToolTip("Clear search")
         self._clear_action.triggered.connect(self.search.clear)
         self._clear_action.setVisible(False)
@@ -1085,10 +1088,11 @@ class MainWindow(QMainWindow):
         task.start()
 
     def _usage_aborted(self, task: BackgroundTask) -> None:
-        """Cancelled because the index or the Tray changed: start over for the new state."""
+        """Cancelled because the index or the Tray changed: start over for the new state (not
+        when it was cancelled because the window is closing)."""
         if self._usage_task is task:
             self._usage_task = None
-        if self._kind is MODS:
+        if self._kind is MODS and not self._closing:
             self._start_usage()
 
     def _usage_progress(self, phase: str, done: int, total: int) -> None:
@@ -1510,6 +1514,7 @@ class MainWindow(QMainWindow):
         """Ask the background work to stop: the index refresh stops at its next check (SQLite
         rolls back anything unfinished, so the next start resumes), plans and name reading
         stop. The app waits for the threads before it exits (tasks.shutdown)."""
+        self._closing = True
         self.index.stop()
         for task in (self._plan_task, self._usage_task, self._received_task):
             if task is not None:

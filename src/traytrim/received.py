@@ -34,14 +34,15 @@ from traytrim.plan import Cancelled
 from traytrim.resolve import EXPECTED_TYPE, LocatedRef, Where, locate
 from traytrim.tray import RefKind, TrayItem, TrayRef
 from traytrim.verify import (MAX_REPORT, ZIP_ERRORS, Check, MemberDamaged, Verification,
-                             check_zip, copy_member, read_back, record_check,
-                             read_zip_comment)
+                             check_zip, copy_member, read_back, read_zip_comment,
+                             record_check, zip_packages)
 
 # progress(step, done, total); step is "check", "copy", "index" or "compare".
 Progress = Callable[[str, int, int], None]
 _SHOWN_KINDS = (tray.ITEM_HOUSEHOLD, tray.ITEM_LOT, tray.ITEM_ROOM)
-_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
-                 *(f"LPT{i}" for i in range(1, 10))}
+# Windows also opens COM and LPT with a superscript 1, 2 or 3 as devices.
+_DEVICE_NAMES = {"CON", "PRN", "AUX", "NUL", "CONIN$", "CONOUT$",
+                 *(f"{d}{n}" for d in ("COM", "LPT") for n in (*"123456789", *"¹²³"))}
 # A received zip is someone else's file: limits keep a broken or hostile one from filling the
 # disk or the memory. Far above anything real (a big tray file is a few MB).
 MAX_ENTRIES = 100_000
@@ -168,7 +169,7 @@ def check_received(zip_path: Path, index: ResourceIndex, progress: Progress | No
                 "export; TrayTrim doesn't unpack it.")]))
         (workdir / "Tray").mkdir()
         (workdir / "Mods").mkdir()
-        packages = [n for n in names if n.startswith("Mods/") and n.endswith(".package")]
+        packages = zip_packages(names)
         _check_space(zip_path, names, workdir)
         exported = "report.json" in names and len(packages) == 1
         if exported:
@@ -238,7 +239,7 @@ def _safe_name(name: str) -> str | None:
     base = re.split(r"[\\/]", name)[-1]
     if (not base or base in (".", "..") or ":" in base or base != base.rstrip(". ")
             or any(ord(c) < 32 for c in base)
-            or base.split(".")[0].upper() in _DEVICE_NAMES):
+            or base.split(".")[0].rstrip(" ").upper() in _DEVICE_NAMES):  # "NUL .x" too
         return None
     return base
 

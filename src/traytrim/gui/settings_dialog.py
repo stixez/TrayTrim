@@ -329,8 +329,13 @@ class SettingsDialog(QDialog):
         body = self._section("About")
         body.addWidget(label(f"TrayTrim {__version__} · free and open source, MIT license",
                              None, wrap=True))
+        body.addWidget(label("Made with Qt for Python (PySide6, LGPLv3) and the IBM Plex fonts "
+                             "(SIL Open Font License); their licenses come with the app, in "
+                             "THIRD_PARTY_NOTICES.md and the LICENSES folder.", "secondary",
+                             wrap=True))
         body.addWidget(label("A fan-made tool, not affiliated with or endorsed by Electronic Arts "
-                             "or Maxis.", "secondary", wrap=True))
+                             "or Maxis. The Sims is a trademark of Electronic Arts Inc.",
+                             "secondary", wrap=True))
         row = QHBoxLayout()
         row.setSpacing(SPACE["l"])
         source = link_button("Source code and releases")

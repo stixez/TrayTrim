@@ -49,8 +49,8 @@ the result. The zip holds the packages, the tray files and a README that says ho
 - **Lets you leave things out** with a click, or all of them at once (Include all, Leave all out,
   for what the search matches), and export only some Sims of a household. The size updates as
   you go.
-- **Never copies game content.** Items from the base game and packs stay out; the README lists the
-  packs the Sims use.
+- **Never copies game content.** Items from the base game and packs stay out; the export's README
+  lists the packs it needs.
 - **Checks every export**: the packages reopen, every file decompresses to the same bytes as its
   source and is in one package only, everything the CC refers to is there, every CC item is
   included.
@@ -60,7 +60,7 @@ the result. The zip holds the packages, the tray files and a README that says ho
   with nothing else installed, then put your Mods back.
 - **Exports several at once**, one verified zip each, or together in one zip that shares its
   packages, like a lot with the household that lives there; search and filter what to pick. A
-  history keeps every export.
+  history keeps your last 200 exports.
 - **Settings** (the gear, or Ctrl+,): light or dark theme, the folders, where exports go and
   whether they make a test kit, update checks, and what TrayTrim keeps in its cache.
 - **Exports one item on its own**: right-click any CC item for a small package with just that
@@ -101,14 +101,17 @@ the result. The zip holds the packages, the tray files and a README that says ho
 **Windows:** get `TrayTrim-<version>-setup.exe` from the
 [Releases](https://github.com/stixez/TrayTrim/releases) page. It installs for your user only, no
 administrator rights needed, and uninstalls from Windows Settings. A portable zip is there too.
+The installer isn't code-signed yet, so SmartScreen may say it comes from an unknown publisher:
+choose More info, then Run anyway.
 
 **macOS (Apple silicon):** get `TrayTrim-<version>-macos-arm64.zip`, unzip it and move TrayTrim
 to Applications. The app isn't signed by Apple yet, so the first time, right-click it and choose
 Open. On an Intel Mac, run it from source (below).
 
-**Linux (Steam/Proton):** get `TrayTrim-<version>-linux-x86_64.tar.gz`, unpack it and run
-`TrayTrim/TrayTrim`. It finds the Sims 4 folders inside Proton's prefix; if it doesn't, choose
-them in the status bar.
+**Linux (x86-64):** get `TrayTrim-<version>-linux-x86_64.tar.gz`, unpack it and run
+`TrayTrim/TrayTrim`. It finds the Sims 4 folders inside Proton's prefix (in any Steam library,
+including one on another drive or an SD card) and in Lutris, Bottles and Heroic prefixes; if it
+doesn't, choose them in the status bar.
 
 The Windows build is tested on a real Sims 4 install; the macOS and Linux builds are built and
 started on each release by CI, but haven't been tried with the game yet. Reports are welcome.
@@ -191,7 +194,7 @@ traytrim info Some.package --list --verify
 
 ## Run from source
 
-Needs Python 3.12.
+Needs Python 3.12 or newer (CI tests 3.12).
 
 ```
 git clone https://github.com/stixez/TrayTrim
@@ -201,6 +204,7 @@ python -m venv .venv
 pip install -e ".[gui,dev]"
 python -m traytrim
 pytest
+ruff check src tests packaging
 ```
 
 Build the app and the Windows installer with `pip install -e ".[gui,build]"` and
@@ -217,7 +221,9 @@ Bug reports and pull requests are welcome. Three rules keep TrayTrim trustworthy
 - No real CC, game or tray files in the repo; tests build small synthetic ones. `pytest` runs on
   Windows, macOS and Linux in CI.
 
-CI also runs `ruff check src tests` (the rules are in `pyproject.toml`).
+CI also runs `ruff check src tests packaging` (the rules are in `pyproject.toml`). More in
+[CONTRIBUTING.md](CONTRIBUTING.md); UI changes follow [docs/DESIGN.md](docs/DESIGN.md). Found a
+security problem? See [SECURITY.md](SECURITY.md).
 
 ## Support
 
@@ -233,7 +239,9 @@ It uses [PySide6](https://doc.qt.io/qtforpython/) (Qt for Python, LGPL) and bund
 `src/traytrim/gui/assets/fonts/OFL.txt`). Resource type ids were cross-checked with
 [Sims 4 Toolkit](https://github.com/sims4toolkit), s4pi-reforged and TS4Tools; the lot and room
 layouts come from [Harbor](https://github.com/Harborofficial/Harbor) (MIT). The snappy decoder is
-written from Google's [format description](https://github.com/google/snappy).
+written from Google's [format description](https://github.com/google/snappy). The licenses of
+everything the app bundles are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), and ship with
+the app.
 
 TrayTrim is a fan-made tool and isn't affiliated with or endorsed by Electronic Arts or Maxis. The
 Sims is a trademark of Electronic Arts Inc.

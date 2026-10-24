@@ -7,6 +7,7 @@ the macOS and Linux (Steam/Proton) locations follow the documented defaults and 
 from __future__ import annotations
 
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,12 +74,63 @@ def _windows_documents(home: Path, use_registry: bool) -> list[Path]:
     return found + [home / "Documents", home / "OneDrive" / "Documents"]
 
 
-def _steam_roots(home: Path) -> list[Path]:
+def _steam_roots(home: Path, platform: str = "linux") -> list[Path]:
+    if platform == "win32":
+        return [Path(base) / "Steam" for env in ("ProgramFiles(x86)", "ProgramFiles")
+                if (base := os.environ.get(env))]
+    if platform == "darwin":
+        return [home / "Library" / "Application Support" / "Steam"]
     return [
         home / ".local" / "share" / "Steam",
         home / ".steam" / "steam",
         home / ".var" / "app" / "com.valvesoftware.Steam" / ".local" / "share" / "Steam",
+        home / "snap" / "steam" / "common" / ".local" / "share" / "Steam",
     ]
+
+
+_VDF_PATH = re.compile(r'"path"\s+"((?:[^"\\]|\\.)*)"')
+
+
+def steam_libraries(home: Path, platform: str = "linux") -> list[Path]:
+    """Every Steam library folder: Steam's own and the ones added on other drives or an SD card
+    (listed in steamapps/libraryfolders.vdf). A game and its Proton prefix live in one of them."""
+    found: list[Path] = []
+    for root in _steam_roots(home, platform):
+        found.append(root)
+        try:
+            text = (root / "steamapps" / "libraryfolders.vdf").read_text(encoding="utf-8",
+                                                                          errors="replace")
+        except OSError:
+            continue
+        found += [Path(m.replace("\\\\", "\\")) for m in _VDF_PATH.findall(text)]
+    # ~/.steam/steam is usually a link to ~/.local/share/Steam: one library, two spellings.
+    unique: dict[Path, Path] = {}
+    for path in found:
+        try:
+            key = path.resolve()
+        except OSError:
+            key = path
+        unique.setdefault(key, path)
+    return list(unique.values())
+
+
+def _wine_documents(home: Path) -> list[Path]:
+    """Documents folders inside Wine prefixes made by Lutris, Bottles, Heroic or plain Wine,
+    whatever the Windows user is called in them."""
+    patterns = [".wine/drive_c/users/*/Documents",
+                "Games/*/drive_c/users/*/Documents",                   # Lutris
+                "Games/Heroic/Prefixes/*/drive_c/users/*/Documents",   # Heroic
+                "Games/Heroic/Prefixes/*/*/drive_c/users/*/Documents",
+                ".local/share/bottles/bottles/*/drive_c/users/*/Documents",
+                ".var/app/com.usebottles.bottles/data/bottles/bottles/*/drive_c/users/*/"
+                "Documents"]
+    found: list[Path] = []
+    for pattern in patterns:
+        try:
+            found += sorted(home.glob(pattern))
+        except OSError:
+            continue
+    return found
 
 
 def documents_candidates(platform: str = sys.platform, home: Path | None = None) -> list[Path]:
@@ -88,9 +140,10 @@ def documents_candidates(platform: str = sys.platform, home: Path | None = None)
         return _windows_documents(home, use_registry)
     if platform == "darwin":
         return [home / "Documents"]
-    # Linux: the game runs under Proton, so the user folder sits inside the Wine prefix.
+    # Linux: the game runs under Proton (the prefix is in the library the game is installed
+    # in) or another Wine, so the user folder sits inside a Wine prefix.
     return [root / "steamapps" / "compatdata" / SIMS4_STEAM_APP_ID / "pfx" / "drive_c" / "users"
-            / "steamuser" / "Documents" for root in _steam_roots(home)]
+            / "steamuser" / "Documents" for root in steam_libraries(home)] + _wine_documents(home)
 
 
 def looks_like_user_dir(path: Path) -> bool:
@@ -100,24 +153,32 @@ def looks_like_user_dir(path: Path) -> bool:
         return False
 
 
-def find_user_dir(platform: str = sys.platform, home: Path | None = None) -> Path | None:
+def user_dirs(platform: str = sys.platform, home: Path | None = None) -> list[Path]:
+    """Every Sims 4 user folder found, the most likely first: one per game language and per
+    Documents folder."""
+    return user_dirs_in(documents_candidates(platform, home))
+
+
+def user_dirs_in(documents: list[Path]) -> list[Path]:
+    """The Sims 4 user folders in these Documents folders (see user_dirs)."""
     seen: set[Path] = set()
-    for docs in documents_candidates(platform, home):
+    found: list[Path] = []
+    for docs in documents:
         ea = docs / "Electronic Arts"
-        if ea in seen or not ea.is_dir():
-            continue
-        seen.add(ea)
-        preferred = ea / "The Sims 4"
-        if looks_like_user_dir(preferred):
-            return preferred
         try:
-            children = sorted(ea.iterdir())
+            if ea in seen or not ea.is_dir():
+                continue
+            seen.add(ea)
+            children = sorted(ea.iterdir(), key=lambda c: (c.name != "The Sims 4", c.name))
         except OSError:  # locked, denied, or an offline OneDrive folder
             continue
-        for child in children:
-            if looks_like_user_dir(child):
-                return child
-    return None
+        found += [child for child in children if looks_like_user_dir(child)]
+    return found
+
+
+def find_user_dir(platform: str = sys.platform, home: Path | None = None) -> Path | None:
+    found = user_dirs(platform, home)
+    return found[0] if found else None
 
 
 def game_dir_candidates(platform: str = sys.platform, home: Path | None = None) -> list[Path]:
@@ -142,12 +203,15 @@ def game_dir_candidates(platform: str = sys.platform, home: Path | None = None) 
             base = os.environ.get(env)
             if base:
                 found += [Path(base) / "Origin Games" / "The Sims 4",
-                          Path(base) / "EA Games" / "The Sims 4",
-                          Path(base) / "Steam" / "steamapps" / "common" / "The Sims 4"]
-        return found
+                          Path(base) / "EA Games" / "The Sims 4"]
+        return found + [root / "steamapps" / "common" / "The Sims 4"
+                        for root in steam_libraries(home, platform)]
+    steam = [root / "steamapps" / "common" / "The Sims 4"
+             for root in steam_libraries(home, platform)]
     if platform == "darwin":
-        return [Path("/Applications/The Sims 4.app"), home / "Applications" / "The Sims 4.app"]
-    return [root / "steamapps" / "common" / "The Sims 4" for root in _steam_roots(home)]
+        return [Path("/Applications/The Sims 4.app"), home / "Applications" / "The Sims 4.app",
+                *steam, *(s / "The Sims 4.app" for s in steam)]
+    return steam
 
 
 def game_content_root(game_dir: Path) -> Path | None:

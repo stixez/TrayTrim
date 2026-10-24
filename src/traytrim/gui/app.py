@@ -5,12 +5,14 @@ from __future__ import annotations
 import gc
 import os
 import sys
+import threading
+import traceback
 from importlib import resources
 
-from PySide6.QtCore import QByteArray, Qt, QTimer
+from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from traytrim.gui import icons, tasks, theme
 from traytrim.gui.main_window import MainWindow
@@ -80,9 +82,69 @@ def _windows_taskbar_identity() -> None:
             pass
 
 
+_ISSUES = "https://github.com/stixez/TrayTrim/issues"
+
+
+class CrashReporter(QObject):
+    """sys.excepthook and threading.excepthook for the app: a bug in a click handler would
+    otherwise only reach stderr, which a windowed app doesn't have, and the user would see
+    nothing happen. The report opens later, on the UI thread: the bug may have happened in a
+    worker thread or in the middle of painting, where a dialog can't open."""
+
+    _report = Signal(str, str)  # headline, details
+
+    def __init__(self, parent: QObject | None = None):
+        super().__init__(parent)
+        self._shown: set[str] = set()
+        self._open = False
+        self._report.connect(self._show, Qt.ConnectionType.QueuedConnection)
+
+    def __call__(self, exc_type, exc, tb) -> None:
+        details = "".join(traceback.format_exception(exc_type, exc, tb))
+        if sys.stderr is not None:  # None in a windowed build
+            sys.stderr.write(details)
+        if issubclass(exc_type, KeyboardInterrupt):
+            return
+        try:
+            self._report.emit(f"TrayTrim hit a bug: {exc_type.__name__}: {exc}", details)
+        except RuntimeError:  # the app is shutting down and Qt already deleted the reporter
+            pass
+
+    def thread_hook(self, args: threading.ExceptHookArgs) -> None:
+        if args.exc_type is not SystemExit:
+            self(args.exc_type, args.exc_value, args.exc_traceback)
+
+    def _show(self, headline: str, details: str) -> None:
+        # Once per bug: one that fails on every repaint would otherwise open box after box.
+        if self._open or headline in self._shown:
+            return
+        self._shown.add(headline)
+        self._open = True
+        try:
+            self.ask(headline, details)
+        finally:
+            self._open = False
+
+    def ask(self, headline: str, details: str) -> None:
+        box = QMessageBox(QMessageBox.Icon.Warning, "TrayTrim", headline,
+                          parent=QApplication.activeWindow())
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setInformativeText(
+            "What you were doing may not have finished. Your Sims 4 folders weren't changed. "
+            f"Copying the details into a report at {_ISSUES} helps fix it.")
+        box.setDetailedText(details)
+        copy = box.addButton("Copy details", QMessageBox.ButtonRole.ActionRole)
+        copy.clicked.connect(lambda: QApplication.clipboard().setText(details))
+        box.setDefaultButton(box.addButton("Close", QMessageBox.ButtonRole.RejectRole))
+        box.exec()
+
+
 def run(theme_override: str | None = None) -> int:
     _windows_taskbar_identity()
     app = create_app()
+    reporter = CrashReporter(app)
+    sys.excepthook = reporter
+    threading.excepthook = reporter.thread_hook
     settings = Settings.load()
     set_theme(app, theme_override if theme_override in THEMES else settings.theme)
     tasks.run_in_background(remove_stale_temp, lambda _n: None, lambda _e: None)
@@ -94,11 +156,18 @@ def run(theme_override: str | None = None) -> int:
         # Packaging check: build the window, then quit cleanly (exit code 0).
         QTimer.singleShot(3000, app.quit)
     code = app.exec()
+    sys.excepthook, threading.excepthook = sys.__excepthook__, threading.__excepthook__
     # Tear down in order while Qt is still alive: stop and wait for background work, delete
     # the window, drop cached images. Left to Python's shutdown, Qt objects can be destroyed
     # after the application object, which crashes the process on exit.
     window.stop_work()
-    tasks.shutdown()
+    if not tasks.shutdown():
+        # A worker is stuck in something it can't stop (a huge read on a slow drive). Tearing
+        # Qt down under it would crash, and everything worth keeping (settings, the index) is
+        # already saved: leave without running Python's shutdown.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(code)
     window.deleteLater()
     del window
     icons.image.cache_clear()

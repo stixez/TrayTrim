@@ -22,9 +22,13 @@ def test_versions_compare_as_numbers():
 
 
 def test_each_platform_gets_its_own_download():
-    assert parse_release(RELEASE, "win32").download.endswith("-setup.exe")
-    assert parse_release(RELEASE, "darwin").download.endswith("-macos-arm64.zip")
-    assert parse_release(RELEASE, "linux").download.endswith("-linux-x86_64.tar.gz")
+    assert parse_release(RELEASE, "win32", "AMD64").download.endswith("-setup.exe")
+    assert parse_release(RELEASE, "darwin", "arm64").download.endswith("-macos-arm64.zip")
+    assert parse_release(RELEASE, "linux", "x86_64").download.endswith("-linux-x86_64.tar.gz")
+    # No build for these machines: they get the release page instead of one that won't run.
+    for system, machine in (("darwin", "x86_64"), ("linux", "aarch64")):
+        r = parse_release(RELEASE, system, machine)
+        assert r.download == r.page
     r = parse_release(RELEASE, "win32")
     assert (r.version, r.notes) == ("0.4.0", "One package per CC item.")
 
@@ -44,6 +48,7 @@ def test_releases_that_cant_be_offered():
 def test_skipped_and_older_releases_are_not_offered(monkeypatch):
     release = parse_release(RELEASE, "win32")
     monkeypatch.setattr(updates, "latest_release", lambda: release)
+    monkeypatch.setattr(updates, "__version__", "0.3.0")
     assert updates.available_update() == release
     assert updates.available_update(skipped="0.4.0") is None
     monkeypatch.setattr(updates, "__version__", "0.4.0")

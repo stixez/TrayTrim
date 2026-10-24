@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read   # only the release job below writes
 
 env:
   QT_QPA_PLATFORM: offscreen
@@ -106,6 +106,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [windows, macos, linux]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # creates the draft release
     steps:
       - uses: actions/download-artifact@v4
         with:

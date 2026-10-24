@@ -15,7 +15,10 @@ dependencies = []
 keywords = ["sims 4", "the sims 4", "custom content", "cc", "mods", "tray", "tray importer",
             "dbpf", "package"]
 classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: End Users/Desktop",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
@@ -25,11 +28,13 @@ classifiers = [
 
 [project.urls]
 Homepage = "https://github.com/stixez/TrayTrim"
+Source = "https://github.com/stixez/TrayTrim"
 Issues = "https://github.com/stixez/TrayTrim/issues"
+Changelog = "https://github.com/stixez/TrayTrim/releases"
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.8"]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff==0.17.2"]  # the ruff CI uses
 build = ["pyinstaller>=6.10", "pillow>=10"]
 
 [project.scripts]
@@ -60,3 +65,9 @@ ignore = ["RUF001", "RUF002", "RUF005", "UP042", "SIM105", "SIM108", "N818"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["PySide6.QtCore.QModelIndex"]
+
+[tool.ruff.lint.per-file-ignores]
+# Drawing the made-up thumbnails: one shape per statement would triple the file.
+"packaging/demo_world.py" = ["E702"]
+# The lambdas there are waited on at once, inside the loop, never later.
+"packaging/make_screenshots.py" = ["B023"]

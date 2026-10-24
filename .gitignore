@@ -16,3 +16,10 @@ dist/
 /build/
 /dist/
 .ruff_cache/
+# editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
+*.log

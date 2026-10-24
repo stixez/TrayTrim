@@ -34,7 +34,7 @@ from traytrim import __version__, dbpf
 from traytrim.dbpf import PackageWriter, ResourceKey
 from traytrim.index import ResourceIndex
 from traytrim.names import ItemName, cas_file_stem, item_names
-from traytrim.paths import config_dir, documents_candidates
+from traytrim.paths import config_dir, documents_candidates, find_user_dir, user_dirs_in
 from traytrim.plan import Cancelled, Plan, PlannedResource, open_packages
 from traytrim.resolve import GameplayMod, LocatedRef, Where, summarize
 from traytrim.tray import HouseholdContents, TrayItem, TrayRef
@@ -200,25 +200,42 @@ def default_base_name(item: TrayItem, contents: HouseholdContents, sim_ids: set[
     return safe_name(item.name)
 
 
-def _inside(path: Path, folder: Path) -> bool:
+def _resolved(path: Path) -> Path:
     try:
-        path.resolve().relative_to(folder.resolve())
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    """Whether path (already resolved) is folder or inside it, following links in folder."""
+    try:
+        path.relative_to(folder.resolve())
         return True
     except (ValueError, OSError):
         return False
 
 
+# The folders of a Sims 4 folder the game loads from or writes to. Each is checked on its own
+# as well: Mods or Tray can be a link (a junction, made by a mod manager) to a folder elsewhere.
+_GAME_FOLDERS = ("Mods", "Tray", "saves")
+
+
 def forbidden_reason(out_dir: Path, user_dir: Path | None, game_dir: Path | None) -> str | None:
     """Why exports can't go to out_dir, or None. TrayTrim never writes where the game, Sims 4
-    Studio or the user's mods live: an export there could be loaded by the game as CC."""
-    if user_dir is not None and _inside(out_dir, user_dir):
-        return ("That folder is inside your Sims 4 folder, which TrayTrim never writes to. "
-                "Pick another folder, for example your Desktop.")
-    if game_dir is not None and _inside(out_dir, game_dir):
+    Studio or the user's mods live: an export there could be loaded by the game as CC. Every
+    Sims 4 folder found counts (one per game language and Documents folder), not only the one
+    in use."""
+    out = _resolved(out_dir)
+    docs = documents_candidates()
+    for sims in dict.fromkeys(([user_dir] if user_dir is not None else []) + user_dirs_in(docs)):
+        if any(_inside(out, folder) for folder in (sims, *(sims / f for f in _GAME_FOLDERS))):
+            return ("That folder is inside your Sims 4 folder, which TrayTrim never writes to. "
+                    "Pick another folder, for example your Desktop.")
+    if game_dir is not None and _inside(out, game_dir):
         return "That folder is inside the game's install folder. Pick another folder."
-    for docs in documents_candidates():
-        if _inside(out_dir, docs / "Sims 4 Studio"):
-            return "That folder belongs to Sims 4 Studio. Pick another folder."
+    if any(_inside(out, d / "Sims 4 Studio") for d in docs):
+        return "That folder belongs to Sims 4 Studio. Pick another folder."
     return None
 
 
@@ -465,7 +482,8 @@ def _test_kit(kit: Path, mods_dir: Path, tray_dir: Path, user_dir: Path | None,
     kit.mkdir()
     shutil.copytree(mods_dir, kit / "Mods")
     shutil.copytree(tray_dir, kit / "Tray")
-    sims = user_dir or Path(SIMS_FOLDER)
+    sims = user_dir or find_user_dir()
+    scripts = sys.platform == "win32" and sims is not None  # they need the real folder
     kind = _kind(parts)
     one = parts[0]
     names = ", ".join(_sim_names(one.contents, one.sim_ids))
@@ -475,11 +493,12 @@ def _test_kit(kit: Path, mods_dir: Path, tray_dir: Path, user_dir: Path | None,
                                                       else ""),
         "",
         "This checks the export in the game with nothing but the exported packages installed.",
-        "TrayTrim never touches your Mods folder; these steps (or the two .bat files on",
-        "Windows) do, and they put everything back.",
+        "TrayTrim never touches your Mods folder; these steps "
+        + ("(or the two .bat files here) do," if scripts else "do,"),
+        "and they put everything back.",
         "",
         "1. Close The Sims 4.",
-        f"2. Rename your Mods folder ({sims / 'Mods'}) to {TEST_BACKUP}.",
+        f"2. Rename your Mods folder ({Path(sims or SIMS_FOLDER) / 'Mods'}) to {TEST_BACKUP}.",
         "3. Make a new, empty Mods folder there, and copy into it:",
         "     - every .package file in this kit's Mods folder",
         f"     - Resource.cfg from {TEST_BACKUP}",
@@ -488,14 +507,14 @@ def _test_kit(kit: Path, mods_dir: Path, tray_dir: Path, user_dir: Path | None,
         "5. Close the game. Delete the test Mods folder and rename "
         f"{TEST_BACKUP} back to Mods.",
         "",
-        "On Windows, 1_start_test.bat does steps 2 and 3, and 2_end_test.bat does step 5.",
-        "Both refuse to do anything while the game is running, and 2_end_test.bat only",
-        "touches the Mods folder if it holds nothing but the test files.",
-        "",
     ]
+    if scripts:
+        steps += ["1_start_test.bat does steps 2 and 3, and 2_end_test.bat does step 5.",
+                  "Both refuse to do anything while the game is running, and 2_end_test.bat only",
+                  "touches the Mods folder if it holds nothing but the test files.", ""]
     (kit / "HOW_TO_TEST.txt").write_text("\n".join(steps), encoding="utf-8")
-    if sys.platform == "win32":
-        _write_bats(kit, Path(sims), kind)
+    if scripts:
+        _write_bats(kit, sims, kind)
 
 
 # Windows' own tasklist and find, by full path: with Git or MSYS tools first on PATH, "find"
@@ -513,7 +532,7 @@ def _write_bats(kit: Path, sims: Path, kind: str = "household") -> None:
     head = f"""@echo off
 chcp 65001 >nul
 setlocal
-set "SIMS={sims}"
+set "SIMS={str(sims).replace("%", "%%")}"
 set "MODS=%SIMS%\\Mods"
 set "BACKUP=%SIMS%\\{TEST_BACKUP}"
 set "KIT=%~dp0Mods"
@@ -605,9 +624,9 @@ def history_path() -> Path:
 def load_history() -> list[dict]:
     try:
         data = json.loads(history_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return []
-    return data if isinstance(data, list) else []
+    return [e for e in data if isinstance(e, dict)] if isinstance(data, list) else []
 
 
 def clear_history() -> None:

@@ -265,6 +265,12 @@ MAX_REPORT = 16 << 20  # a report.json larger than this isn't one TrayTrim wrote
 ZIP_ERRORS = (OSError, *DAMAGE_ERRORS)
 
 
+def zip_packages(names: list[str]) -> list[str]:
+    """The packages in an export's Mods folder, in zip order. Any case: a zip repacked by
+    another tool can spell it "mods/" or ".PACKAGE"."""
+    return [n for n in names if n.lower().startswith("mods/") and n.lower().endswith(".package")]
+
+
 def read_zip_comment(comment: bytes) -> dict | None:
     """What export._zip_comment wrote in a TrayTrim export's zip comment, or None for any
     other zip."""
@@ -272,7 +278,7 @@ def read_zip_comment(comment: bytes) -> dict | None:
         return None
     try:
         meta = json.loads(comment)
-    except ValueError:
+    except (ValueError, RecursionError):  # nested thousands deep: not one TrayTrim wrote
         return None
     return meta if isinstance(meta, dict) else None
 
@@ -326,7 +332,7 @@ def check_zip(zip_path: Path, progress: CheckProgress | None = None,
     with z, tempfile.TemporaryDirectory(prefix="traytrim-check-",
                                         ignore_cleanup_errors=True) as tmp:
         names = z.namelist()
-        packages = [n for n in names if n.startswith("Mods/") and n.endswith(".package")]
+        packages = zip_packages(names)
         meta = read_zip_comment(z.comment)
         if not packages or ("report.json" not in names and meta is None):
             return Verification([Check(
@@ -335,8 +341,9 @@ def check_zip(zip_path: Path, progress: CheckProgress | None = None,
                 "a TrayTrim export.")])
 
         damaged: list[str] = []
+        package_set = set(packages)
         for name in names:  # the small files; the packages are checked while they're copied
-            if name in packages:
+            if name in package_set:
                 continue
             try:
                 copy_member(z, name)
@@ -418,7 +425,7 @@ def check_zip(zip_path: Path, progress: CheckProgress | None = None,
             listed = {str(f["key"]): f["bytes"] for f in report["files"]}
             if not all(isinstance(n, int) for n in listed.values()):
                 raise TypeError("a file size isn't a number")
-        except (ValueError, KeyError, TypeError) as e:
+        except (ValueError, KeyError, TypeError, RecursionError) as e:
             checks.append(Check("It matches its report", False,
                                 f"report.json can't be read ({e})."))
             return Verification(checks)
