@@ -84,14 +84,15 @@ class CcState:
     def title(self, ref: LocatedRef) -> str:
         return display_name(ref, self.names.get(ref.ref))
 
-    def source(self, ref: LocatedRef, title: str | None = None) -> str:
-        """The package the item comes from, as its file is named in Mods, for the line under
-        its title: a part's own name is often the EA item it was cloned from ("Dress Maxi Lemon"
-        for a corset dress), and the package is the name players recognise. Its folder is in
-        the tooltip. Empty when the title already says it."""
+    def subtitle(self, ref: LocatedRef, title: str | None = None) -> str:
+        """The line under a card's title. For an item named after its package, which swatch
+        it is ("Solid Magenta"). Otherwise the package it comes from, as its file is named in
+        Mods (its folder is in the tooltip): a part's own name is often the EA item it was
+        cloned from ("Dress Maxi Lemon" for a corset dress), and the package is the name
+        players recognise. Empty when the title already says it."""
         name = self.names.get(ref.ref)
         if name is not None and name.package:
-            return ""  # the title is the package's name already
+            return name.swatch
         package = package_name(ref) if self.show_source else ""
         stem, shown = _plain(package), _plain(self.title(ref) if title is None else title)
         if not stem or stem in shown or shown in stem:
@@ -172,9 +173,9 @@ class CcState:
         else:
             verb = "Press Enter to export it on its own." if self.mode == EXPORT else ""
         approx = " Approximate match." if ref.approximate else ""
-        source = self.source(ref)
-        source = f", from {source}" if source else ""
-        return f"{item_label(ref)}, {self.title(ref)}{source}. {verb}{approx}".strip()
+        sub = self.subtitle(ref)
+        sub = f", {sub}" if sub else ""
+        return f"{item_label(ref)}, {self.title(ref)}{sub}. {verb}{approx}".strip()
 
 
 def _plain(text: str) -> str:
@@ -186,19 +187,19 @@ def _plain(text: str) -> str:
 
 
 @functools.cache
-def _card_metrics(source: bool = True) -> tuple[QFontMetrics, QFontMetrics, int]:
+def _card_metrics() -> tuple[QFontMetrics, QFontMetrics, int]:
     """Caption and body metrics, and a card's height: picture, caption, two lines of title,
-    the source line (if shown), the size line and room for "Not exported"."""
+    the subtitle, the size line and room for "Not exported"."""
     caption = QFontMetrics(theme.ui_font("caption"))
     body = QFontMetrics(theme.ui_font("body"))
     height = (SPACE["s"] + THUMB + SPACE["s"] + caption.height() + SPACE["xs"]
-              + _title_block(caption, body, source) + 18 + SPACE["xs"] + 18 + SPACE["s"])
+              + _title_block(caption, body) + 18 + SPACE["xs"] + 18 + SPACE["s"])
     return caption, body, height
 
 
-def _title_block(caption: QFontMetrics, body: QFontMetrics, source: bool) -> int:
-    """The title's two lines and the source line under them, with the gap after."""
-    return 2 * body.lineSpacing() + (caption.height() if source else 0) + SPACE["xs"]
+def _title_block(caption: QFontMetrics, body: QFontMetrics) -> int:
+    """The title's two lines and the subtitle under them, with the gap after."""
+    return 2 * body.lineSpacing() + caption.height() + SPACE["xs"]
 
 
 class CardDelegate(QStyledItemDelegate):
@@ -210,13 +211,13 @@ class CardDelegate(QStyledItemDelegate):
         """As wide as the grid's cells allow (they share out the row's width), less the gap."""
         view = option.widget
         cell = view.gridSize().width() if isinstance(view, QListView) else 0
-        return QSize(max(CARD_WIDTH, cell - GAP), _card_metrics(self.state.show_source)[2])
+        return QSize(max(CARD_WIDTH, cell - GAP), _card_metrics()[2])
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         p = theme.current()
         s = self.state
         ref: LocatedRef = index.data(RefRole)
-        caption_m, body_m, height = _card_metrics(s.show_source)
+        caption_m, body_m, height = _card_metrics()
         card = QRectF(option.rect.left(), option.rect.top(),
                       max(CARD_WIDTH, option.rect.width()), height)
         included = s.included(ref) or s.mode != TOGGLE
@@ -285,7 +286,7 @@ class CardDelegate(QStyledItemDelegate):
             painter.drawText(QRectF(x, y, width, body_m.lineSpacing()),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
             y += body_m.lineSpacing()
-        source = s.source(ref, title)
+        source = s.subtitle(ref, title)
         if source:  # right under the title, however many lines it took
             painter.setFont(theme.ui_font("caption"))
             painter.setPen(QColor(p.text_secondary))
@@ -293,7 +294,7 @@ class CardDelegate(QStyledItemDelegate):
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                              caption_m.elidedText(source, Qt.TextElideMode.ElideRight,
                                                   int(width)))
-        y = title_top + _title_block(caption_m, body_m, s.show_source)
+        y = title_top + _title_block(caption_m, body_m)
         size = s.size(ref)
         if size:
             painter.setFont(theme.ui_font("caption"))
@@ -383,7 +384,7 @@ class CardGrid(QListView):
         if len(refs) > BIG:  # laid out a batch at a time, so the window stays responsive
             self.setLayoutMode(QListView.LayoutMode.Batched)
             self.setBatchSize(500)
-        self.setGridSize(QSize(CARD_WIDTH + GAP, _card_metrics(state.show_source)[2] + GAP))
+        self.setGridSize(QSize(CARD_WIDTH + GAP, _card_metrics()[2] + GAP))
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.setMouseTracking(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

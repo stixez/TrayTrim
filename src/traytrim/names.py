@@ -41,6 +41,7 @@ _AGE_GENDER = re.compile(r"^[bpcytaeu][fmu][A-Z][A-Za-z]*$")
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _COPY = re.compile(r"\s*\(\d+\)$")          # "Slingbacks(1)": a second download of the file
 _JOINED = re.compile(r"(?<=[^\W_])-(?=[^\W_])")  # "Metallic-Corset", not "NA - Skyla"
+_MERGE = re.compile(r"merge", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -49,6 +50,7 @@ class ItemName:
     creator: str = ""      # the prefix of a CAS part's internal name, when there is one
     raw: str = ""          # the name as stored, for tooltips
     package: str = ""      # its package's name made readable, when the package is this item
+    swatch: str = ""       # which swatch of the item it is ("Solid Magenta"), when that shows
 
 
 def string_table(data: bytes) -> dict[int, str]:
@@ -112,21 +114,38 @@ def readable_package_name(stem: str) -> str:
             continue
         if _AGE_GENDER.match(part):  # "yfTop": the category is enough
             part = part[2:]
-        words.append(_CAMEL.sub(" ", _JOINED.sub(" ", part)))
+        if part.count("-") > 1:  # "Metallic-Corset-Mini-Dress": the hyphens are spaces;
+            part = _JOINED.sub(" ", part)  # one is part of a word ("T-Shirt", "cc-star")
+        words.append(_CAMEL.sub(" ", part))
     text = " ".join(words)
     text = re.sub(r"\]\s*-?", "] ", text).replace("[", " [")  # "[BRAND]-Long" -> "[BRAND] Long"
     text = " ".join(text.split())
     return text or stem
 
 
-def item_base(raw: str) -> str:
-    """Which item a CAS part is a swatch of: "LVNDR_yfAcc_ManiRound_beige_2025..." and
-    "LVNDR_yfAcc_ManiRound_red_2025..." are both "yfacc_maniround"."""
+def _item_and_swatch(raw: str) -> tuple[str, list[str]]:
+    """Which item a CAS part is a swatch of, and the swatch's words:
+    "LVNDR_yfAcc_ManiRound_beige_2025..." is ("lvndr_yfacc_maniround", ["beige"]). A name of the
+    creator's own, "Me_Long_Waves_black", is all but its last part (two parts are a name)."""
     parts = [p for p in raw.split("_") if p and not _STAMP.match(p)]
     at = next((i for i, p in enumerate(parts) if _AGE_GENDER.match(p)), None)
-    if at is None:  # a name of the creator's own: all but the swatch at the end
-        return "_".join(parts[:-1] or parts).casefold()
-    return "_".join(parts[at:at + 2]).casefold()
+    if at is None:
+        cut = len(parts) - 1 if len(parts) >= 3 else len(parts)
+        return "_".join(parts[:cut]).casefold(), parts[cut:]
+    creators = dict.fromkeys(p.casefold() for p in parts[:at])  # "A_A_yfAcc" is A's too
+    return "_".join([*creators, *(p.casefold() for p in parts[at:at + 2])]), parts[at + 2:]
+
+
+def item_base(raw: str) -> str:
+    """Which item a CAS part is a swatch of: "LVNDR_yfAcc_ManiRound_beige_2025..." and
+    "LVNDR_yfAcc_ManiRound_red_2025..." are both "lvndr_yfacc_maniround". The creator's prefix
+    counts: two creators' parts cloned from one EA item are two items."""
+    return _item_and_swatch(raw)[0]
+
+
+def swatch_name(raw: str) -> str:
+    """"Bergdorf_yfAcc_IndexLeftEyeballRing_SolidMagenta_2023..." -> "Solid Magenta"."""
+    return " ".join(_CAMEL.sub(" ", p) for p in _item_and_swatch(raw)[1])
 
 
 def readable_cas_name(raw: str) -> ItemName:
@@ -161,6 +180,7 @@ class _Package:
     def __init__(self, path: Path):
         self.pkg = dbpf.Package(path)
         self._strings: dict[int, str] | None = None
+        self._one_item: bool | None = None
         self._by_instance: dict[int, list[dbpf.IndexEntry]] = {}
         for e in self.pkg:
             self._by_instance.setdefault(e.key.instance, []).append(e)
@@ -183,34 +203,43 @@ class _Package:
                     None)
 
     def one_item(self) -> bool:
-        """Whether every CAS part in the package is a swatch of one item (not a merge)."""
-        try:
-            stat = os.stat(self.pkg.path)
-        except OSError:
-            return _one_item(self.pkg, None)
-        return _one_item(self.pkg, (str(self.pkg.path), stat.st_size, stat.st_mtime_ns))
+        """Whether the package is one CAS item, in any number of swatches: not a merge, and no
+        objects or build items next to it (a set named after the whole set). Worked out once
+        per package (cached by file, size and time across households); False if it can't be
+        read."""
+        if self._one_item is None:
+            try:
+                stat = os.stat(self.pkg.path)
+                self._one_item = _one_item(self.pkg, (str(self.pkg.path), stat.st_size,
+                                                      stat.st_mtime_ns))
+            except (dbpf.DbpfError, struct.error, OSError):
+                self._one_item = False
+        return self._one_item
 
 
-def _one_item(pkg: dbpf.Package, file: tuple | None) -> bool:
-    if file is not None and file in _ONE_ITEM:
+def _one_item(pkg: dbpf.Package, file: tuple) -> bool:
+    if file in _ONE_ITEM:
         return _ONE_ITEM[file]
+    answer = not _MERGE.search(os.path.basename(file[0]))
     bases: set[str] = set()
-    for e in pkg:
+    for e in pkg if answer else ():
+        if e.key.type in (restypes.OBJECT_CATALOG, restypes.OBJECT_DEFINITION):
+            answer = False
+            break
         if e.key.type != restypes.CASP:
             continue
         try:
             raw = cas_internal_name(pkg.read(e))
         except (dbpf.DbpfError, struct.error):
             continue
-        if raw:
+        if raw and any(c.isalpha() for c in raw):  # numbers only say nothing
             bases.add(item_base(raw))
             if len(bases) > 1:
                 break
-    answer = len(bases) == 1
-    if file is not None:
-        if len(_ONE_ITEM) > 20_000:  # a whole Mods folder is a few thousand packages
-            _ONE_ITEM.clear()
-        _ONE_ITEM[file] = answer
+    answer = answer and len(bases) == 1
+    if len(_ONE_ITEM) > 20_000:  # a whole Mods folder is a few thousand packages
+        _ONE_ITEM.clear()
+    _ONE_ITEM[file] = answer
     return answer
 
 
@@ -263,7 +292,8 @@ def _name(r: LocatedRef, kind: RefKind, pkg: _Package) -> ItemName | None:
             return None
         name = readable_cas_name(raw)
         if pkg.one_item():
-            name = replace(name, package=readable_package_name(r.used.path.stem))
+            name = replace(name, package=readable_package_name(r.used.path.stem),
+                           swatch=swatch_name(raw))
         return name
     if kind is RefKind.OBJECT:
         entry = pkg.entry(restypes.OBJECT_CATALOG, r.ref.instance)

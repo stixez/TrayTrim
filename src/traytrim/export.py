@@ -122,7 +122,9 @@ def package_stem(name: ItemName | None, fallback: str) -> str:
     objects and build items use their catalog name ("Driftwood_Rattan_Chair_TT")."""
     text = ""
     if name is not None:
-        if name.creator and name.raw:
+        if name.package:  # named as the app shows it: its package, and which swatch
+            text = " ".join(filter(None, (name.package, name.swatch)))
+        elif name.creator and name.raw:
             text = cas_file_stem(name.raw)
         else:
             text = name.title  # no title (only numbers): named like an item without a name

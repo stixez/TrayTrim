@@ -126,6 +126,7 @@ def test_a_name_of_numbers_only_gives_way_to_the_package_name():
     ("SHOESTOPIA+-+Salopato+High+Heels", "SHOESTOPIA - Salopato High Heels"),
     ("NA - Skyla Heels", "NA - Skyla Heels"),
     ("[B0T0XBRAT]-Long-Dress", "[B0T0XBRAT] Long Dress"),
+    ("Creator_Off-Shoulder_T-Shirt", "Creator Off-Shoulder T-Shirt"),
     ("___", "___"),
 ])
 def test_readable_package_names(stem, readable):
@@ -153,6 +154,41 @@ def test_a_package_of_one_item_names_it(tmp_path):
         ix.update(mods, tmp_path / "Game")
         refs = [located(ix, RefKind.CAS_PART, k) for k in (bag[0], merged[0])]
     names = item_names(refs)
-    assert names[refs[0].ref].title == "Index Left Eyeball Ring Solid Magenta"  # kept for search
-    assert display_name(refs[0], names[refs[0].ref]) == "Bergdorf Miu Miu Wander Teddy Bag LH"
+    bag_name = names[refs[0].ref]
+    assert bag_name.title == "Index Left Eyeball Ring Solid Magenta"  # kept for search
+    assert display_name(refs[0], bag_name) == "Bergdorf Miu Miu Wander Teddy Bag LH"
+    assert bag_name.swatch == "Solid Magenta"
     assert display_name(refs[1], names[refs[1].ref]) == "Ear Studs Pearl Cream"
+    from traytrim.export import package_stem  # exported under the name the app shows
+    assert package_stem(bag_name, "x") == "Bergdorf_Miu_Miu_Wander_Teddy_Bag_LH_Solid_Magenta_TT"
+
+
+def test_merges_and_sets_are_not_one_item(tmp_path):
+    mods = tmp_path / "Mods"
+    mods.mkdir()
+    # Two creators' parts cloned from one EA dress are two items; so is a file named a merge,
+    # and a CAS part next to objects (a set).
+    with PackageWriter(mods / "dresses.package") as w:
+        w.add(ResourceKey(restypes.CASP, 0, 1), casp("Ann_yfBody_DressMaxi_Lemon"))
+        w.add(ResourceKey(restypes.CASP, 0, 2), casp("Bea_yfBody_DressMaxi_Lemon"))
+    with PackageWriter(mods / "Hair MERGED.package") as w:
+        w.add(ResourceKey(restypes.CASP, 0, 3), casp("Me_yfHair_Bob_black"))
+    with PackageWriter(mods / "bedroom set.package") as w:
+        w.add(ResourceKey(restypes.CASP, 0, 4), casp("Me_yfAcc_Blanket_white"))
+        w.add(ResourceKey(restypes.OBJECT_CATALOG, 0, 5), catalog(0x11))
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        ix.update(mods, tmp_path / "Game")
+        refs = [located(ix, RefKind.CAS_PART, ResourceKey(restypes.CASP, 0, i)) for i in (1, 3, 4)]
+    names = item_names(refs)
+    assert all(not names[r.ref].package for r in refs)
+
+
+@pytest.mark.parametrize("raw, swatch", [
+    ("Bergdorf_yfAcc_IndexLeftEyeballRing_SolidMagenta_202303282111074027", "Solid Magenta"),
+    ("Me_Long_Waves_black", "black"),
+    ("Set_Top", ""),  # two parts: a name, no swatch
+])
+def test_swatch_names(raw, swatch):
+    from traytrim.names import swatch_name
+
+    assert swatch_name(raw) == swatch
