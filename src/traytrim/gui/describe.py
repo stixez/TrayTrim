@@ -77,7 +77,11 @@ def package_name(ref: LocatedRef) -> str:
 
 
 def display_name(ref: LocatedRef, name: ItemName | None) -> str:
-    """The item's own name when its package has one, else the package it's in."""
+    """The name of its package made readable when the package is this one item (a CAS part's
+    own name is mostly the EA item it was cloned from), else the item's own name, else the
+    package's file name."""
+    if name is not None and name.package:
+        return name.package
     return name.title if name is not None and name.title else package_name(ref)
 
 

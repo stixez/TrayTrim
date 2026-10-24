@@ -89,6 +89,9 @@ class CcState:
         its title: a part's own name is often the EA item it was cloned from ("Dress Maxi Lemon"
         for a corset dress), and the package is the name players recognise. Its folder is in
         the tooltip. Empty when the title already says it."""
+        name = self.names.get(ref.ref)
+        if name is not None and name.package:
+            return ""  # the title is the package's name already
         package = package_name(ref) if self.show_source else ""
         stem, shown = _plain(package), _plain(self.title(ref) if title is None else title)
         if not stem or stem in shown or shown in stem:
@@ -142,9 +145,9 @@ class CcState:
         lines = []
         name = self.names.get(ref.ref)
         if name is not None:
-            lines.append(name.title + (f" by {name.creator}" if name.creator else ""))
+            lines.append(self.title(ref) + (f" by {name.creator}" if name.creator else ""))
             if name.raw and name.raw != name.title:
-                lines.append(name.raw)
+                lines.append(name.raw)  # its name inside the package
             lines.append("")
         lines.append(ref.used.rel if ref.used else "")
         if len(ref.mods) > 1:
@@ -964,7 +967,8 @@ class CcBrowser(QWidget):
         if not words:
             return True
         name = s.names.get(ref.ref)
-        haystack = " ".join([s.title(ref), name.creator if name else "", name.raw if name else "",
+        haystack = " ".join([s.title(ref), name.title if name else "",
+                             name.creator if name else "", name.raw if name else "",
                              ref.used.rel if ref.used else "", item_label(ref),
                              card_caption(ref)]).casefold()
         return all(word in haystack for word in words)

@@ -11,13 +11,21 @@ every CAS part has the internal name its creator gave it in Sims 4 Studio, right
 preset list (s4pi CASPartResource; checked on 1,940 real parts, none had presets). It looks
 like "LVNDR_yfAcc_ManiRoundSolidColor_beige_202511021041562324" and is turned into
 "Mani Round Solid Color beige" by `readable_cas_name`, keeping the original for tooltips.
+
+That name mostly isn't the CC's: what follows "yfAcc" is the EA item the part was cloned
+from, which the creator rarely renames (in a real Mods folder a corset mini dress was
+"DressMaxi_Lemon" and a Miu Miu bag "IndexLeftEyeballRing"). The package's file name is the
+name players know. So when a package holds one item, in any number of swatches, the item goes
+by its package's name made readable (`readable_package_name`); in a merge of many items each
+keeps its part name.
 """
 
 from __future__ import annotations
 
+import os
 import re
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from traytrim import dbpf, restypes
@@ -31,13 +39,16 @@ _STAMP = re.compile(r"^\d{8,}$")
 # names parts. Everything before it is the creator's prefix.
 _AGE_GENDER = re.compile(r"^[bpcytaeu][fmu][A-Z][A-Za-z]*$")
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
+_COPY = re.compile(r"\s*\(\d+\)$")          # "Slingbacks(1)": a second download of the file
+_JOINED = re.compile(r"(?<=[^\W_])-(?=[^\W_])")  # "Metallic-Corset", not "NA - Skyla"
 
 
 @dataclass(frozen=True)
 class ItemName:
-    title: str             # what to show
+    title: str             # the item's own name
     creator: str = ""      # the prefix of a CAS part's internal name, when there is one
     raw: str = ""          # the name as stored, for tooltips
+    package: str = ""      # its package's name made readable, when the package is this item
 
 
 def string_table(data: bytes) -> dict[int, str]:
@@ -88,6 +99,34 @@ def cas_internal_name(data: bytes) -> str:
     if n > 1024 or p + n > len(data) or n % 2:
         return ""
     return data[p:p + n].decode("utf-16-be", "replace").strip()
+
+
+def readable_package_name(stem: str) -> str:
+    """A package's file name as a name: "Bergdorf_MiuMiu_WanderTeddyBag_LH" -> "Bergdorf Miu
+    Miu Wander Teddy Bag LH", "Nivelle_yfTop_HalterBackZip_202601011200" -> "Nivelle Top Halter
+    Back Zip", "[SUNBERRY]V.2 Logo Belt" -> "[SUNBERRY] V.2 Logo Belt"."""
+    text = _COPY.sub("", stem.replace("+", " "))
+    words = []
+    for part in text.split("_"):
+        if not part or _STAMP.match(part):
+            continue
+        if _AGE_GENDER.match(part):  # "yfTop": the category is enough
+            part = part[2:]
+        words.append(_CAMEL.sub(" ", _JOINED.sub(" ", part)))
+    text = " ".join(words)
+    text = re.sub(r"\]\s*-?", "] ", text).replace("[", " [")  # "[BRAND]-Long" -> "[BRAND] Long"
+    text = " ".join(text.split())
+    return text or stem
+
+
+def item_base(raw: str) -> str:
+    """Which item a CAS part is a swatch of: "LVNDR_yfAcc_ManiRound_beige_2025..." and
+    "LVNDR_yfAcc_ManiRound_red_2025..." are both "yfacc_maniround"."""
+    parts = [p for p in raw.split("_") if p and not _STAMP.match(p)]
+    at = next((i for i, p in enumerate(parts) if _AGE_GENDER.match(p)), None)
+    if at is None:  # a name of the creator's own: all but the swatch at the end
+        return "_".join(parts[:-1] or parts).casefold()
+    return "_".join(parts[at:at + 2]).casefold()
 
 
 def readable_cas_name(raw: str) -> ItemName:
@@ -143,6 +182,42 @@ class _Package:
         return next((e for e in self._by_instance.get(instance, ()) if e.key.type == type_id),
                     None)
 
+    def one_item(self) -> bool:
+        """Whether every CAS part in the package is a swatch of one item (not a merge)."""
+        try:
+            stat = os.stat(self.pkg.path)
+        except OSError:
+            return _one_item(self.pkg, None)
+        return _one_item(self.pkg, (str(self.pkg.path), stat.st_size, stat.st_mtime_ns))
+
+
+def _one_item(pkg: dbpf.Package, file: tuple | None) -> bool:
+    if file is not None and file in _ONE_ITEM:
+        return _ONE_ITEM[file]
+    bases: set[str] = set()
+    for e in pkg:
+        if e.key.type != restypes.CASP:
+            continue
+        try:
+            raw = cas_internal_name(pkg.read(e))
+        except (dbpf.DbpfError, struct.error):
+            continue
+        if raw:
+            bases.add(item_base(raw))
+            if len(bases) > 1:
+                break
+    answer = len(bases) == 1
+    if file is not None:
+        if len(_ONE_ITEM) > 20_000:  # a whole Mods folder is a few thousand packages
+            _ONE_ITEM.clear()
+        _ONE_ITEM[file] = answer
+    return answer
+
+
+# (path, size, modified) -> whether the package holds one item; read once per change of the
+# file (a merge of thousands of parts takes about a second).
+_ONE_ITEM: dict[tuple, bool] = {}
+
 
 def item_names(refs: list[LocatedRef], cancel=None) -> dict[TrayRef, ItemName]:
     """Names for the CC items among refs that have one (objects, build items, CAS parts),
@@ -184,7 +259,12 @@ def item_names(refs: list[LocatedRef], cancel=None) -> dict[TrayRef, ItemName]:
 def _name(r: LocatedRef, kind: RefKind, pkg: _Package) -> ItemName | None:
     if kind is RefKind.CAS_PART:
         raw = cas_internal_name(pkg.pkg.read(r.used.entry))
-        return readable_cas_name(raw) if raw else None
+        if not raw:
+            return None
+        name = readable_cas_name(raw)
+        if pkg.one_item():
+            name = replace(name, package=readable_package_name(r.used.path.stem))
+        return name
     if kind is RefKind.OBJECT:
         entry = pkg.entry(restypes.OBJECT_CATALOG, r.ref.instance)
     else:

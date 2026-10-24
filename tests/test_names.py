@@ -116,3 +116,43 @@ def test_a_name_of_numbers_only_gives_way_to_the_package_name():
 
     assert readable_cas_name("-1889534009:976845349").title == ""
     assert readable_cas_name("yfHead").title == "yfHead"
+
+
+@pytest.mark.parametrize("stem, readable", [
+    ("Bergdorf_MiuMiu_WanderTeddyBag_LH", "Bergdorf Miu Miu Wander Teddy Bag LH"),
+    ("Nivelle_yfTop_HalterBackZip_SolidBlack_202601011200", "Nivelle Top Halter Back Zip Solid Black"),
+    ("[SUNBERRY]V.2 Logo Belt Mini Skirt 24.13", "[SUNBERRY] V.2 Logo Belt Mini Skirt 24.13"),
+    ("Sentate-2025-MagnoliaSlingbacks(1)", "Sentate 2025 Magnolia Slingbacks"),
+    ("SHOESTOPIA+-+Salopato+High+Heels", "SHOESTOPIA - Salopato High Heels"),
+    ("NA - Skyla Heels", "NA - Skyla Heels"),
+    ("[B0T0XBRAT]-Long-Dress", "[B0T0XBRAT] Long Dress"),
+    ("___", "___"),
+])
+def test_readable_package_names(stem, readable):
+    from traytrim.names import readable_package_name
+
+    assert readable_package_name(stem) == readable
+
+
+def test_a_package_of_one_item_names_it(tmp_path):
+    # A real case: a Miu Miu bag whose parts are all "Bergdorf_yfAcc_IndexLeftEyeballRing_...",
+    # the EA ring it was cloned from. In a merge, each part keeps its own name.
+    from traytrim.gui.describe import display_name
+
+    mods = tmp_path / "Mods"
+    mods.mkdir()
+    bag = [ResourceKey(restypes.CASP, 0x80000000, 0xB000 + i) for i in range(2)]
+    merged = [ResourceKey(restypes.CASP, 0x80000000, 0xC000 + i) for i in range(2)]
+    with PackageWriter(mods / "Bergdorf_MiuMiu_WanderTeddyBag_LH.package") as w:
+        for key, swatch in zip(bag, ("SolidMagenta", "SolidBlack"), strict=True):
+            w.add(key, casp(f"Bergdorf_yfAcc_IndexLeftEyeballRing_{swatch}_202303282111074027"))
+    with PackageWriter(mods / "Accessories 1.package") as w:
+        w.add(merged[0], casp("Sbe_yfAcc_EarStudsPearl_Cream_202106200325154040"))
+        w.add(merged[1], casp("LYNX_yfAcc_GlassesMod_PinkHot_202005271753244432"))
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        ix.update(mods, tmp_path / "Game")
+        refs = [located(ix, RefKind.CAS_PART, k) for k in (bag[0], merged[0])]
+    names = item_names(refs)
+    assert names[refs[0].ref].title == "Index Left Eyeball Ring Solid Magenta"  # kept for search
+    assert display_name(refs[0], names[refs[0].ref]) == "Bergdorf Miu Miu Wander Teddy Bag LH"
+    assert display_name(refs[1], names[refs[1].ref]) == "Ear Studs Pearl Cream"
