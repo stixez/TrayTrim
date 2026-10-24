@@ -1207,3 +1207,81 @@ def test_switches_in_settings_load_only_as_switches(tmp_path):
     path.write_text('{"export_test_kit": "no", "check_updates": false}', encoding="utf-8")
     loaded = Settings.load(path)
     assert loaded.export_test_kit is True and loaded.check_updates is False
+
+
+def test_the_export_bar_shows_a_failed_plan_with_its_retry(app):
+    from PySide6.QtTest import QTest
+
+    view, _refs = _lot_view(120, height=500)
+    retried = []
+    view.show_plan_error(0x0010175A327A0833, "Disk on fire", lambda: retried.append(1))
+    view.scroll.verticalScrollBar().setValue(view.scroll.verticalScrollBar().maximum())
+    QTest.qWait(10)
+    assert view.sticky.isVisible()
+    assert view.sticky.size_label.text() == "Couldn't work out the export"
+    assert view.sticky.retry_button.isVisibleTo(view.sticky)
+    view.sticky.retry_button.click()
+    assert retried == [1]
+    view.deleteLater()
+
+
+def test_an_item_picked_again_after_leaving_it_starts_without_filters(app, tmp_path):
+    from traytrim.gui.household_view import HouseholdView
+
+    gen, _index, _refs, report = _household(tmp_path)
+    view = HouseholdView()
+    view.show_report(report)
+    view.browser.search.setText("hair")
+    view.show_report(report)  # the same item again without leaving it (a Sim chip)
+    assert view.browser.search.text() == "hair"
+    view.show_message("Moreau", "Reading its Sims.", loading=True)  # left, then picked again
+    view.show_report(report)
+    assert view.browser.search.text() == ""
+    view.deleteLater()
+    next(gen, None)
+
+
+def test_thumbnails_asked_for_are_not_asked_again_after_a_rebuild(app):
+    view, refs = _lot_view(5)
+    asked = []
+    view.thumbnails_wanted.connect(lambda _i, wanted: asked.extend(wanted))
+    view.grab()
+    app.processEvents()
+    from PySide6.QtTest import QTest
+    QTest.qWait(60)
+    first = len(asked)
+    assert first == len(refs)
+    view._rebuild()  # a theme change before the answers came
+    view.grab()
+    QTest.qWait(60)
+    assert len(asked) == first
+    view.deleteLater()
+
+
+def test_the_settings_read_again_button_comes_back(app, tmp_path, monkeypatch):
+    from traytrim.gui import settings_dialog
+    from traytrim.gui.settings_dialog import SettingsDialog
+
+    monkeypatch.setattr(settings_dialog, "cache_dir", lambda: tmp_path)
+    monkeypatch.setattr("traytrim.export.config_dir", lambda: tmp_path / "config")
+    dialog = SettingsDialog(Settings(), lambda: (None, None), lambda: None, lambda: None,
+                            lambda: None)
+    dialog.refresh_button.click()
+    assert not dialog.refresh_button.isEnabled()
+    dialog.refresh_finished()
+    assert dialog.refresh_button.isEnabled()
+    assert dialog.refresh_button.text() == "Read Mods and the game again"
+    dialog.deleteLater()
+
+
+def test_export_several_on_the_start_page_says_why_it_is_off(app, monkeypatch):
+    from traytrim.gui import main_window
+
+    monkeypatch.setattr(main_window.paths, "resolve_folders",
+                        lambda *_a: main_window.paths.Sims4Folders(None, None))
+    win = main_window.MainWindow(Settings())
+    win._tray_ready = win._index_ready = True  # an empty Tray, the index done
+    win._show_overview()
+    card = win.household.overview.cards[0]
+    assert not card.isEnabled() and "Tray has a household" in card.accessibleDescription()
+    win.deleteLater()

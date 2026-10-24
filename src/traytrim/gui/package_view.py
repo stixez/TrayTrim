@@ -70,6 +70,7 @@ class PackageView(ReportPage):
         self._names: dict[TrayRef, ItemName] = {}
         self._thumbs: OrderedDict[int, QImage] = OrderedDict()
         self._tried: set[int] = set()
+        self._asked: set[int] = set()
         self.browser: CcBrowser | None = None
         self._state: CcState | None = None
         self._view, self._sort = "cards", "category"  # kept from package to package
@@ -112,7 +113,7 @@ class PackageView(ReportPage):
         same = self.report is not None and self.report.path == report.path
         self.report = report
         if not same:
-            self._names, self._thumbs, self._tried = {}, OrderedDict(), set()
+            self._names, self._thumbs, self._tried, self._asked = {}, OrderedDict(), set(), set()
             self._filters = ("", "all", "all")
         self._users = self._dependents = None
         self._unreadable, self._failed, self._tray_read = [], "", True
@@ -162,7 +163,8 @@ class PackageView(ReportPage):
         placeholder."""
         if self.report is None or self.report.path != path:
             return
-        state = self._state or CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS)
+        state = self._state or CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS,
+                                       asked=self._asked)
         state.add_thumbnails(images, tried)
         if self.browser is not None:
             self.browser.repaint_items()
@@ -235,7 +237,8 @@ class PackageView(ReportPage):
             col.addSpacing(SPACE["l"])
             path = r.path
             # Pictures are read as cards are shown; a big package keeps the latest ones.
-            state = CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS)
+            state = CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS,
+                            asked=self._asked)
             state.names = self._names
             state.on_wanted = lambda refs: self.thumbnails_wanted.emit(path, refs)
             browser = CcBrowser(r.items, state, view=self._view, sort=self._sort, usage=False,

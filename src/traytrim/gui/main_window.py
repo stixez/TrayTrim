@@ -640,10 +640,11 @@ class MainWindow(QMainWindow):
         else:  # reading it, not found, or unreadable: what the sidebar says too
             title, line = self._tray_state[0] or "Reading your Tray folder", self._tray_state[1]
         can_batch = self._index_ready and bool(items)
+        batch_text = ("One zip each, or several together in one zip (Ctrl+Shift+E)." if can_batch
+                      else "Once the index of your Mods is ready." if not self._index_ready
+                      else "Once your Tray has a household, lot or room in it.")
         actions = [
-            ("layers", "Export several", "One zip each, or several together in one zip "
-             "(Ctrl+Shift+E)." if can_batch else "Once the index of your Mods is ready.",
-             self._export_several, can_batch),
+            ("layers", "Export several", batch_text, self._export_several, can_batch),
             ("shield-check", "Check a zip", "See whether a zip someone sent you works in your "
              "game, before installing it (Ctrl+O).", self._choose_zip, True),
             ("history", "Export history", "Find earlier exports and check them again (Ctrl+H).",
@@ -878,9 +879,17 @@ class MainWindow(QMainWindow):
         self._run_dialog(HistoryDialog(self._open_zip, self))
 
     def _show_settings(self) -> None:
-        self._run_dialog(SettingsDialog(
+        dialog = SettingsDialog(
             self.settings, lambda: (self.folders.user_dir, self.folders.game_dir),
-            self._choose_user_dir, self._choose_game_dir, self._refresh_index, self))
+            self._choose_user_dir, self._choose_game_dir, self._refresh_index, self)
+        # The index's read ends (done, failed or stopped): the dialog's Read again comes back.
+        self.index.result_ready.connect(dialog.refresh_finished)
+        self.index.stopped.connect(dialog.refresh_finished)
+        try:
+            self._run_dialog(dialog)
+        finally:
+            self.index.result_ready.disconnect(dialog.refresh_finished)
+            self.index.stopped.disconnect(dialog.refresh_finished)
 
     @staticmethod
     def _run_dialog(dialog) -> None:
@@ -936,6 +945,7 @@ class MainWindow(QMainWindow):
             if complete and tray_gen == self._tray_gen and not self._index_ready:
                 self._index_ready = True
                 self._update_batch_button()
+                self._refresh_overview()
                 self._analysis_gen += 1
                 self._analyse()
                 self._index_changed()

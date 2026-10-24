@@ -77,8 +77,9 @@ class HouseholdView(QWidget):
         # to one shows its pictures at once), up to MAX_THUMBNAILS: browsing many households
         # would otherwise keep every picture ever seen.
         self._thumbs: OrderedDict[int, QImage] = OrderedDict()
-        # Thumbnails are loaded for the cards painted on screen: tried means asked and
-        # answered, with or without an image.
+        # Thumbnails are loaded for the cards painted on screen: asked (and not answered yet),
+        # and tried (answered, with or without an image), kept across rebuilds.
+        self._thumbs_asked: set[int] = set()
         self._thumbs_tried: set[int] = set()
         self._theme_timer = QTimer(self, singleShot=True, interval=0)
         self._theme_timer.timeout.connect(self._rebuild)
@@ -108,6 +109,7 @@ class HouseholdView(QWidget):
     def show_overview(self, *args) -> None:
         """Nothing picked: what's there and where to start (Overview.fill's arguments)."""
         self.sticky.hide()
+        self._browser_item = None  # picked again, the item starts with no search or filter
         self._report = None
         self._plan = None
         self._gameplay = []
@@ -120,6 +122,7 @@ class HouseholdView(QWidget):
     def show_message(self, title: str, body: str, loading: bool = False) -> None:
         """loading: a loader screen with a spinner, while the item is read."""
         self.sticky.hide()
+        self._browser_item = None  # the page was left: picked again, a fresh start
         self._report = None
         self._plan = None
         self._gameplay = []
@@ -190,7 +193,7 @@ class HouseholdView(QWidget):
         """Thumbnails loaded for the instances `tried`; those without one get the
         placeholder. Kept for whichever household is on screen: it may share them."""
         state = self._state or CcState(TOGGLE, False, self._thumbs, self._thumbs_tried,
-                                       MAX_THUMBNAILS)
+                                       MAX_THUMBNAILS, asked=self._thumbs_asked)
         state.add_thumbnails(images, tried)
         if self.browser is not None:
             self.browser.repaint_items()
@@ -321,7 +324,7 @@ class HouseholdView(QWidget):
 
         col.addSpacing(SPACE["xl"])
         self.hero = Hero(self.export_requested.emit, r.noun)
-        self.hero.changed.connect(self._update_sticky)
+        self.hero.changed.connect(self._sync_sticky)
         self.hero.show_working()
         col.addWidget(self.hero)
         self.sticky.set_title(r.item.name or f"Unnamed {r.noun}")
@@ -358,7 +361,7 @@ class HouseholdView(QWidget):
         else:
             instance = r.item.instance
             state = CcState(TOGGLE, len(r.sim_ids) > 1, self._thumbs, self._thumbs_tried,
-                            MAX_THUMBNAILS)
+                            MAX_THUMBNAILS, asked=self._thumbs_asked)
             state.names = self._names
             state.excluded = r.excluded  # the same set: what's left out is the report's
             state.on_wanted = lambda refs: self.thumbnails_wanted.emit(instance, refs)
@@ -636,26 +639,41 @@ class HouseholdView(QWidget):
         self.hero.show_working()
         self.exclusion_changed.emit(set(r.excluded))
 
-    def _update_sticky(self, *_args) -> None:
-        """The export bar over the top of the page, while the export size and its Export
-        button are scrolled out of sight."""
+    def _hero_on_page(self):
         hero = getattr(self, "hero", None)
         page = self.scroll.widget()
         if self._report is None or hero is None or page is None or not page.isAncestorOf(hero):
-            self.sticky.hide()
-            return
-        bottom = hero.mapTo(page, QPoint(0, hero.height())).y()
-        out_of_sight = bottom < self.scroll.verticalScrollBar().value()
-        self.sticky.copy(hero)
+            return None
+        return hero
+
+    def _sync_sticky(self, *_args) -> None:
+        """What the export bar says (the Hero changed) and where it sits (the page resized)."""
+        hero = self._hero_on_page()
+        if hero is not None:
+            self.sticky.copy(hero)
         viewport = self.scroll.viewport().geometry()
         self.sticky.setGeometry(viewport.left(), viewport.top(), viewport.width(),
                                 self.sticky.sizeHint().height())
-        self.sticky.setVisible(out_of_sight and self.stack.currentWidget() is self.scroll)
-        self.sticky.raise_()
+        self._update_sticky()
+
+    def _update_sticky(self, *_args) -> None:
+        """The export bar over the top of the page, while the export size and its Export
+        button are scrolled out of sight (on every scroll step: only shown or hidden)."""
+        hero = self._hero_on_page()
+        if hero is None:
+            self.sticky.hide()
+            return
+        bottom = hero.mapTo(self.scroll.widget(), QPoint(0, hero.height())).y()
+        show = (bottom < self.scroll.verticalScrollBar().value()
+                and self.stack.currentWidget() is self.scroll)
+        if show != self.sticky.isVisible():
+            self.sticky.setVisible(show)
+            if show:
+                self.sticky.raise_()
 
     def resizeEvent(self, event) -> None:  # noqa: N802
         super().resizeEvent(event)
-        self._update_sticky()
+        self._sync_sticky()
 
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(800, 600)

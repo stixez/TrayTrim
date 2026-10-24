@@ -273,16 +273,20 @@ class TrayList(QListView):
             if item_type is not None:
                 self.proxy.set_type(item_type)
             self.proxy.set_text(text)
-            self.selectionModel().clearSelection()
-            self.setCurrentIndex(QModelIndex())
-            if self._chosen is not None:
-                for row in range(self.proxy.rowCount()):
-                    index = self.proxy.index(row, 0)
-                    if index.data(ItemRole) is self._chosen:
-                        self.setCurrentIndex(index)
-                        break
+            self._reselect()
         finally:
             self._filtering = False
+
+    def _reselect(self) -> None:
+        """The chosen item selected again where it now is (if it's shown)."""
+        self.selectionModel().clearSelection()
+        self.setCurrentIndex(QModelIndex())
+        if self._chosen is not None:
+            for row in range(self.proxy.rowCount()):
+                index = self.proxy.index(row, 0)
+                if index.data(ItemRole) is self._chosen:
+                    self.setCurrentIndex(index)
+                    break
 
     def replace_items(self, items: list[TrayItem]) -> bool:
         """The Tray read again: new items, the chosen one kept chosen if it's still there (by
@@ -316,10 +320,10 @@ class TrayList(QListView):
 
     def set_sort(self, sort_by: str) -> None:
         """Order the rows; the chosen item stays chosen, and in view."""
-        self.set_filter(self.proxy._needle, None)  # keeps the choice through the re-sort
         self._filtering = True
         try:
             self.proxy.set_sort(sort_by)
+            self._reselect()
         finally:
             self._filtering = False
         if self.currentIndex().isValid():

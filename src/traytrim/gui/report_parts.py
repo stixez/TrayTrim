@@ -83,12 +83,19 @@ class Hero(QWidget):
         col.addSpacing(SPACE["xs"])
         col.addWidget(self.bar)
         self._retry: QPushButton | None = None
+        self.state = "working"  # "working", "error" or "done": what the number says
+
+    def retry(self) -> None:
+        """Work the export out again, after a failure."""
+        if self.state == "error":
+            self._on_retry()
 
     def show_working(self, done: int = 0, total: int = 0) -> None:
         self.export_button.setEnabled(False)
         if self._retry is not None:
             self._retry.hide()
         self.number.setText("Working out the export")
+        self.state = "working"
         set_role(self.number, "heroPending")
         self.spinner.show()
         self.saving.setText("")
@@ -108,6 +115,7 @@ class Hero(QWidget):
         self.bar.hide()
         self.spinner.hide()
         set_role(self.number, "heroPending")
+        self.state = "error"
         self.number.setText("Couldn't work out the export")
         self.saving.setText("")
         self.line.setText(f"{reason}. If the index is being updated, wait for it to finish.")
@@ -120,6 +128,7 @@ class Hero(QWidget):
         self.changed.emit()
 
     def show_plan(self, plan: Plan) -> None:
+        self.state = "done"
         self.bar.hide()
         self.spinner.hide()
         if self._retry is not None:
@@ -173,8 +182,14 @@ class StickyBar(QWidget):
         row.addWidget(label("\u00b7", "secondary"))
         row.addWidget(self.size_label)
         row.addWidget(self.saving)
+        self.retry_button = link_button("Try again")
+        self.retry_button.setAccessibleName("Try working out the export again")
+        self.retry_button.hide()
+        row.addWidget(self.retry_button)
         row.addStretch(1)
         row.addWidget(self.export_button)
+        self._hero: Hero | None = None
+        self.retry_button.clicked.connect(lambda: self._hero is not None and self._hero.retry())
         self.refresh_theme()
         self.hide()
 
@@ -182,11 +197,16 @@ class StickyBar(QWidget):
         self.title.setText(title)
 
     def copy(self, hero: Hero) -> None:
-        """Show what the page's Hero shows: the size, or that it's being worked out."""
-        pending = hero.number.property("role") == "heroPending"
-        self.size_label.setText(hero.number.text() if not pending else "Working out the export\u2026")
-        set_role(self.size_label, "secondary" if pending else "title")
-        self.saving.setText(hero.saving.text())
+        """Show what the page's Hero shows: the size, that it's being worked out, or that it
+        couldn't be (with its Try again)."""
+        self._hero = hero
+        text = {"working": "Working out the export\u2026",
+                "error": "Couldn't work out the export"}.get(hero.state, hero.number.text())
+        self.size_label.setText(text)
+        set_role(self.size_label, "danger" if hero.state == "error"
+                 else "secondary" if hero.state == "working" else "title")
+        self.saving.setText(hero.saving.text() if hero.state == "done" else "")
+        self.retry_button.setVisible(hero.state == "error")
         self.export_button.setEnabled(hero.export_button.isEnabled())
 
     def refresh_theme(self) -> None:

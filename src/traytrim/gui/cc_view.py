@@ -29,8 +29,9 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QFrame, QHBoxLay
                                QVBoxLayout, QWidget)
 
 from traytrim.gui import icons, theme
-from traytrim.gui.describe import (THUMB_TYPES, card_caption, category_icon, display_name,
-                                   group_refs, item_label, plural, usage_summary, usage_text)
+from traytrim.gui.describe import (GROUP_ORDER, THUMB_TYPES, card_caption, category_icon,
+                                   display_name, group_refs, item_label, plural, usage_summary,
+                                   usage_text)
 from traytrim.gui.theme import RADIUS, SPACE
 from traytrim.gui.widgets import MenuButton, label, link_button, wrap_and_elide
 from traytrim.names import ItemName
@@ -59,13 +60,15 @@ class CcState:
     sizes and what's left out. `thumbs` may be shared between browsers (a cache)."""
 
     def __init__(self, mode: str, with_names: bool, thumbs: OrderedDict | None = None,
-                 tried: set[int] | None = None, max_thumbs: int = 0):
+                 tried: set[int] | None = None, max_thumbs: int = 0,
+                 asked: set[int] | None = None):
         self.mode = mode
         self.with_names = with_names        # a household of several Sims: who uses what
         self.names: dict[TrayRef, ItemName] = {}
         self.thumbs: OrderedDict[int, QImage] = thumbs if thumbs is not None else OrderedDict()
         self.tried: set[int] = tried if tried is not None else set()  # answered, image or not
-        self.asked: set[int] = set()
+        # Asked and not answered yet; shared like `tried`, so a rebuild doesn't ask again.
+        self.asked: set[int] = asked if asked is not None else set()
         self.all_tried = False              # every thumbnail there'll be is in (no more asks)
         self.max_thumbs = max_thumbs        # 0: keep every one
         self.sizes: dict[TrayRef, int] | None = None  # bytes each item adds to the export
@@ -110,6 +113,7 @@ class CcState:
     def add_thumbnails(self, images: dict[int, QImage], tried: set[int]) -> None:
         self.thumbs.update(images)
         self.tried |= tried | set(images)
+        self.asked -= tried | set(images)
         while self.max_thumbs and len(self.thumbs) > self.max_thumbs:
             old, _image = self.thumbs.popitem(last=False)  # asked again if it comes back
             self.tried.discard(old)
@@ -620,11 +624,8 @@ class CcTable(QTreeView):
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.setAccessibleName("CC items")
         header = self.header()
-        header.setStretchLastSection(False)
         header.setSectionsClickable(True)
         header.setSortIndicatorShown(True)
-        # Fixed widths, not fitted to the contents: fitting reads every row (seconds for a
-        # big lot), and the page would jump as names arrive.
         # Shares of the width, worked out on every resize (_share_width): fitting columns to
         # their contents reads every row (seconds for a big lot), and fixed widths leave the
         # name nothing in a narrow window. Paths are shortened; their tooltips have them whole.
@@ -826,8 +827,10 @@ class CcBrowser(QWidget):
         counts: dict[str, int] = {}
         for r in self.refs:
             counts[r.ref.group] = counts.get(r.ref.group, 0) + 1
+        order = {g: i for i, g in enumerate(GROUP_ORDER)}  # as group_refs orders sections
         return [("all", f"All ({len(self.refs):,})")] + [
-            (g, f"{g} ({counts[g]:,})") for g, _refs in group_refs(self.refs)]
+            (g, f"{g} ({n:,})") for g, n in sorted(counts.items(),
+                                                    key=lambda kv: order.get(kv[0], 99))]
 
     def _view_toggle(self) -> QWidget:
         box = QWidget()

@@ -167,6 +167,11 @@ class SettingsDialog(QDialog):
         self.refresh_button = again
         body.addWidget(again, 0, Qt.AlignmentFlag.AlignLeft)
 
+    def refresh_finished(self, *_args) -> None:
+        """The read the button started is over: it can be started again."""
+        self.refresh_button.setText("Read Mods and the game again")
+        self.refresh_button.setEnabled(True)
+
     def _show_folders(self) -> None:
         user, game = self._folders()
         self.user_label.setText(str(user) if user else "Not found")
