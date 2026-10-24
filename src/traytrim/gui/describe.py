@@ -65,8 +65,8 @@ def item_subtitle(item: TrayItem, with_price: bool = False) -> str:
 
 
 def card_caption(ref: LocatedRef) -> str:
-    """The small line above the package name. Every card in the Objects section is an object,
-    so there it says how often it's placed instead."""
+    """The small line above a card's title: what kind of item it is. Every card in the Objects
+    section is an object, so there it says how often it's placed instead."""
     if ref.ref.kind is RefKind.OBJECT and ref.usage:
         return summarize_uses(set().union(*ref.usage.values()))
     return item_label(ref)

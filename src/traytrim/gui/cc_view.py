@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import functools
 import math
+import re
 from collections import OrderedDict
 from collections.abc import Callable
 from typing import ClassVar
@@ -30,8 +31,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QFrame, QHBoxLay
 
 from traytrim.gui import icons, theme
 from traytrim.gui.describe import (GROUP_ORDER, THUMB_TYPES, card_caption, category_icon,
-                                   display_name, group_refs, item_label, plural, usage_summary,
-                                   usage_text)
+                                   display_name, group_refs, item_label, package_name, plural,
+                                   usage_summary, usage_text)
 from traytrim.gui.theme import RADIUS, SPACE
 from traytrim.gui.widgets import MenuButton, label, link_button, wrap_and_elide
 from traytrim.names import ItemName
@@ -73,6 +74,8 @@ class CcState:
         self.max_thumbs = max_thumbs        # 0: keep every one
         self.sizes: dict[TrayRef, int] | None = None  # bytes each item adds to the export
         self.excluded: set[TrayRef] = set()
+        # Cards name the package each item comes from (off where the page is one package).
+        self.show_source = True
         self.on_wanted: Callable[[list[LocatedRef]], None] | None = None
         self._wish: list[LocatedRef] = []
         self._timer = QTimer(singleShot=True, interval=30)
@@ -80,6 +83,17 @@ class CcState:
 
     def title(self, ref: LocatedRef) -> str:
         return display_name(ref, self.names.get(ref.ref))
+
+    def source(self, ref: LocatedRef, title: str | None = None) -> str:
+        """The package the item comes from, as its file is named in Mods, for the line under
+        its title: a part's own name is often the EA item it was cloned from ("Dress Maxi Lemon"
+        for a corset dress), and the package is the name players recognise. Its folder is in
+        the tooltip. Empty when the title already says it."""
+        package = package_name(ref) if self.show_source else ""
+        stem, shown = _plain(package), _plain(self.title(ref) if title is None else title)
+        if not stem or stem in shown or shown in stem:
+            return ""
+        return package
 
     def included(self, ref: LocatedRef) -> bool:
         return ref.ref not in self.excluded
@@ -155,19 +169,33 @@ class CcState:
         else:
             verb = "Press Enter to export it on its own." if self.mode == EXPORT else ""
         approx = " Approximate match." if ref.approximate else ""
-        return f"{item_label(ref)}, {self.title(ref)}. {verb}{approx}".strip()
+        source = self.source(ref)
+        source = f", from {source}" if source else ""
+        return f"{item_label(ref)}, {self.title(ref)}{source}. {verb}{approx}".strip()
+
+
+def _plain(text: str) -> str:
+    """Letters and digits only, for telling whether two names say the same."""
+    return re.sub(r"[\W_]+", "", text.casefold())
 
 
 # Cards
 
 
 @functools.cache
-def _card_metrics() -> tuple[QFontMetrics, QFontMetrics, int]:
+def _card_metrics(source: bool = True) -> tuple[QFontMetrics, QFontMetrics, int]:
+    """Caption and body metrics, and a card's height: picture, caption, two lines of title,
+    the source line (if shown), the size line and room for "Not exported"."""
     caption = QFontMetrics(theme.ui_font("caption"))
     body = QFontMetrics(theme.ui_font("body"))
     height = (SPACE["s"] + THUMB + SPACE["s"] + caption.height() + SPACE["xs"]
-              + 2 * body.lineSpacing() + SPACE["xs"] + 18 + SPACE["xs"] + 18 + SPACE["s"])
+              + _title_block(caption, body, source) + 18 + SPACE["xs"] + 18 + SPACE["s"])
     return caption, body, height
+
+
+def _title_block(caption: QFontMetrics, body: QFontMetrics, source: bool) -> int:
+    """The title's two lines and the source line under them, with the gap after."""
+    return 2 * body.lineSpacing() + (caption.height() if source else 0) + SPACE["xs"]
 
 
 class CardDelegate(QStyledItemDelegate):
@@ -179,13 +207,13 @@ class CardDelegate(QStyledItemDelegate):
         """As wide as the grid's cells allow (they share out the row's width), less the gap."""
         view = option.widget
         cell = view.gridSize().width() if isinstance(view, QListView) else 0
-        return QSize(max(CARD_WIDTH, cell - GAP), _card_metrics()[2])
+        return QSize(max(CARD_WIDTH, cell - GAP), _card_metrics(self.state.show_source)[2])
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
         p = theme.current()
         s = self.state
         ref: LocatedRef = index.data(RefRole)
-        caption_m, body_m, height = _card_metrics()
+        caption_m, body_m, height = _card_metrics(s.show_source)
         card = QRectF(option.rect.left(), option.rect.top(),
                       max(CARD_WIDTH, option.rect.width()), height)
         included = s.included(ref) or s.mode != TOGGLE
@@ -246,14 +274,23 @@ class CardDelegate(QStyledItemDelegate):
                          caption_m.elidedText(card_caption(ref), Qt.TextElideMode.ElideRight,
                                               int(width)))
         y += caption_m.height() + SPACE["xs"]
+        title_top = y
+        title = s.title(ref)
         painter.setFont(theme.ui_font("body"))
         painter.setPen(QColor(p.text if included else p.text_secondary))
-        for line in wrap_and_elide(s.title(ref), body_m, int(width), 2):
+        for line in wrap_and_elide(title, body_m, int(width), 2):
             painter.drawText(QRectF(x, y, width, body_m.lineSpacing()),
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, line)
             y += body_m.lineSpacing()
-        y = thumb.bottom() + SPACE["s"] + caption_m.height() + SPACE["xs"] \
-            + 2 * body_m.lineSpacing() + SPACE["xs"]
+        source = s.source(ref, title)
+        if source:  # right under the title, however many lines it took
+            painter.setFont(theme.ui_font("caption"))
+            painter.setPen(QColor(p.text_secondary))
+            painter.drawText(QRectF(x, y, width, caption_m.height()),
+                             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                             caption_m.elidedText(source, Qt.TextElideMode.ElideRight,
+                                                  int(width)))
+        y = title_top + _title_block(caption_m, body_m, s.show_source)
         size = s.size(ref)
         if size:
             painter.setFont(theme.ui_font("caption"))
@@ -343,7 +380,7 @@ class CardGrid(QListView):
         if len(refs) > BIG:  # laid out a batch at a time, so the window stays responsive
             self.setLayoutMode(QListView.LayoutMode.Batched)
             self.setBatchSize(500)
-        self.setGridSize(QSize(CARD_WIDTH + GAP, _card_metrics()[2] + GAP))
+        self.setGridSize(QSize(CARD_WIDTH + GAP, _card_metrics(state.show_source)[2] + GAP))
         self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.setMouseTracking(True)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)

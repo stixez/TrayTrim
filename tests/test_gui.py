@@ -207,6 +207,14 @@ def test_detail_view_search_sort_and_names(app, tmp_path):
     assert len(b.shown()) == 2
     view.set_names(5, {refs[0].ref: ItemName("Long Waves", "Me", "Me_yfHair_LongWaves")})
     assert b.state.title(refs[0]) == "Long Waves"
+    # The card also says which package it's from: a part's own name is often an EA one.
+    assert "Long Waves, from hair." in b.state.accessible(refs[0])
+    assert ", from" not in b.state.accessible(refs[1])  # named after its package already
+    assert b.state.source(refs[0]) == "hair"
+    named = b.state.names[refs[0].ref]
+    b.state.names[refs[0].ref] = ItemName("Hair", "", "Hair")  # says the same, any case
+    assert b.state.source(refs[0]) == ""
+    b.state.names[refs[0].ref] = named
     b.search.setText("waves")
     assert b.shown() == [refs[0]] and b.match_label.text() == "1 of 2 shown"
     b.search.setText("nothing like this")

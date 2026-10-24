@@ -239,6 +239,7 @@ class PackageView(ReportPage):
             # Pictures are read as cards are shown; a big package keeps the latest ones.
             state = CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS,
                             asked=self._asked)
+            state.show_source = False  # every card is from the package the page is about
             state.names = self._names
             state.on_wanted = lambda refs: self.thumbnails_wanted.emit(path, refs)
             browser = CcBrowser(r.items, state, view=self._view, sort=self._sort, usage=False,
