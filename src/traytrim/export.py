@@ -125,7 +125,7 @@ def package_stem(name: ItemName | None, fallback: str) -> str:
         if name.creator and name.raw:
             text = cas_file_stem(name.raw)
         else:
-            text = name.title or name.raw
+            text = name.title  # no title (only numbers): named like an item without a name
     stem = (safe_name(text, "", limit=STEM_LIMIT)
             or safe_name(fallback, "Item", limit=STEM_LIMIT))
     return stem + SUFFIX
@@ -608,6 +608,15 @@ def load_history() -> list[dict]:
     except (OSError, ValueError):
         return []
     return data if isinstance(data, list) else []
+
+
+def clear_history() -> None:
+    """Forget every export in the history (the zips themselves stay where they are)."""
+    path = history_path()
+    tmp = path.with_suffix(".tmp")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp.write_text("[]", encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _add_to_history(parts: list[Part], result: ExportResult, item_name: str = "") -> None:

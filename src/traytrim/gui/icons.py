@@ -10,7 +10,8 @@ from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 NAMES = ("search", "clear", "check", "chevron-right", "chevron-down", "alert", "info", "folder",
-         "export", "copies", "excluded", "package")
+         "export", "copies", "excluded", "package", "layers", "shield-check", "history", "coffee",
+         "settings")
 
 
 @cache

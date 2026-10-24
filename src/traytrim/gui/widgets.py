@@ -6,16 +6,16 @@ import html
 import math
 import re
 
-from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter, QPen
+from PySide6.QtCore import QElapsedTimer, QEvent, QObject, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QActionGroup, QColor, QFont, QFontMetrics, QPainter, QPen
 from PySide6.QtGui import Qt as GuiQt
 from PySide6.QtWidgets import (QAbstractButton, QAbstractItemView, QGridLayout, QHBoxLayout,
-                               QLabel, QProgressBar, QPushButton, QSizePolicy, QToolTip,
+                               QLabel, QMenu, QProgressBar, QPushButton, QSizePolicy, QToolTip,
                                QVBoxLayout, QWidget)
 
 from traytrim import SUPPORT_URL
 from traytrim.gui import icons, system, theme
-from traytrim.gui.theme import SPACE
+from traytrim.gui.theme import RADIUS, SPACE
 
 
 _BREAK_AFTER = re.compile(r"([_\-./\\])(?=\S)")
@@ -234,15 +234,17 @@ class Notice(QWidget):
 
     A detail row is (item, info, tooltip) or (item, info, tooltip, (link text, callback));
     `actions` are links next to Show, like Copy list. `expanded` and `on_expand` let the view
-    keep the details open when the notice is rebuilt."""
+    keep the details open when the notice is rebuilt. compact: only the title line until
+    Show (the explanation opens with the details), for a page with several notices."""
 
     def __init__(self, icon_name: str, token: str, title: str, body: str,
                  details: list[tuple] | None = None,
                  actions: list[tuple[str, object]] | None = None, expanded: bool = False,
-                 on_expand=None, parent=None):
+                 on_expand=None, compact: bool = False, parent=None):
         super().__init__(parent)
         outer = QHBoxLayout(self)
-        outer.setContentsMargins(0, SPACE["m"], 0, SPACE["m"])
+        outer.setContentsMargins(0, SPACE["s"] if compact else SPACE["m"], 0,
+                                 SPACE["s"] if compact else SPACE["m"])
         outer.setSpacing(SPACE["m"])
         outer.addWidget(IconLabel(icon_name, token), 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
@@ -251,13 +253,18 @@ class Notice(QWidget):
         head.setSpacing(SPACE["m"])
         head.addWidget(label(title, "noticeTitle", wrap=True), 1)
         col.addLayout(head)
-        col.addWidget(label(body, "secondary", wrap=True))
+        body_label = label(body, "secondary", wrap=True)
+        if not compact:
+            col.addWidget(body_label)
         outer.addLayout(col, 1)
-        if details:
+        if details or (compact and body):
             box = QWidget()
             box_col = QVBoxLayout(box)
-            box_col.setContentsMargins(0, SPACE["s"], 0, 0)
+            box_col.setContentsMargins(0, SPACE["xs"] if compact else SPACE["s"], 0, 0)
             box_col.setSpacing(SPACE["s"])
+            if compact:
+                box_col.addWidget(body_label)
+            details = details or []
             grid = QGridLayout()
             grid.setHorizontalSpacing(SPACE["l"])
             grid.setVerticalSpacing(SPACE["xs"])
@@ -271,12 +278,15 @@ class Notice(QWidget):
             self._add_rows()
             box.setVisible(expanded)
             col.addWidget(box)
+            has_box = True
+        else:
+            has_box = False
         for text, callback in actions or []:
             link = link_button(text)
             link.setAccessibleName(f"{text}: {title}")
             link.clicked.connect(lambda _c=False, f=callback, w=link: f(w))
             head.addWidget(link, 0, Qt.AlignmentFlag.AlignTop)
-        if details:
+        if has_box:
             toggle = link_button("Hide" if expanded else "Show")
             toggle.setAccessibleName(f"Show details: {title}")
 
@@ -407,12 +417,9 @@ class SupportLine(QWidget):
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(SPACE["s"])
-        row.addWidget(label("TrayTrim is free. If it saved you time, you can", "secondary"))
-        link = link_button("buy me a coffee")
-        link.setToolTip(SUPPORT_URL)
-        link.setAccessibleName("Buy me a coffee (opens buymeacoffee.com)")
-        link.clicked.connect(lambda: system.open_url(SUPPORT_URL))
-        row.addWidget(link)
+        row.setSpacing(SPACE["m"])
+        row.addWidget(label("TrayTrim is free. If it saved you time:", "secondary"))
+        row.addWidget(CoffeeButton())
         row.addStretch(1)
 
 
@@ -514,3 +521,165 @@ class LoadingPanel(QWidget):
         if total > 0:
             self.bar.setRange(0, total)
             self.bar.setValue(min(done, total))
+
+
+class MenuButton(QPushButton):
+    """"Sort: Category ▾": a button that opens a menu of choices, one of them current. Takes
+    less room than a row of segments and holds as many choices as needed. An option is
+    (key, text) or (key, text, shorter text for the button)."""
+
+    chosen = Signal(str)  # the key of the choice made
+
+    def __init__(self, title: str, options: list[tuple], current: str, parent=None):
+        super().__init__(parent)
+        self._title = title
+        self._options: list[tuple] = []
+        self._current = current
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setLayoutDirection(Qt.LayoutDirection.RightToLeft)  # the arrow after the text
+        self.clicked.connect(self._open)
+        self.set_options(options, current)
+        self.refresh_theme()
+
+    @property
+    def current(self) -> str:
+        return self._current
+
+    def set_options(self, options: list[tuple], current: str | None = None) -> None:
+        self._options = options
+        keys = [o[0] for o in options]
+        if current is not None:
+            self._current = current
+        if self._current not in keys and keys:
+            self._current = keys[0]
+        option = next((o for o in options if o[0] == self._current), ("", ""))
+        # Left-to-right marks: the button is laid out right to left (the arrow after the
+        # text), which would otherwise move a trailing ")" to the front.
+        self.setText(f"\u200e{self._title}: {option[-1]}\u200e")
+        self.setToolTip(f"{self._title}: {option[1]}")
+        self.setAccessibleName(f"{self._title}: {option[1]}. Opens a menu of choices.")
+
+    def refresh_theme(self) -> None:
+        self.setIcon(icons.icon("chevron-down", theme.current().text_secondary, 16))
+        self.setIconSize(QSize(16, 16))
+
+    def _open(self) -> None:
+        menu = QMenu(self)
+        menu.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
+        group = QActionGroup(menu)
+        for key, text, *_short in self._options:
+            action = menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(key == self._current)
+            action.setData(key)
+            group.addAction(action)
+        picked = menu.exec(self.mapToGlobal(self.rect().bottomLeft()))
+        menu.deleteLater()
+        if picked is not None and picked.data() != self._current:
+            self.set_options(self._options, picked.data())
+            self.chosen.emit(self._current)
+
+
+class FooterAction(QAbstractButton):
+    """One of the sidebar's actions at the bottom: its icon over a short name, on a tile that
+    lights up under the pointer. Tells more (and its shortcut) in its tooltip."""
+
+    _ICON = 20
+
+    def __init__(self, icon_name: str, text: str, tip: str, parent=None):
+        super().__init__(parent)
+        self._icon = icon_name
+        self.setText(text)
+        self.setToolTip(tip)
+        self.setAccessibleName(text)
+        self.setAccessibleDescription(tip)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.TabFocus)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)  # repaints on hover
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        caption = QFontMetrics(theme.ui_font("caption", QFont.Weight.Medium))
+        width = max(72, caption.horizontalAdvance(self.text()) + 2 * SPACE["s"])
+        return QSize(width, SPACE["s"] + self._ICON + SPACE["xs"] + caption.height() + SPACE["s"])
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = theme.current()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        enabled = self.isEnabled()
+        if enabled and (self.underMouse() or self.isDown()):
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(QColor(p.selection if self.isDown() else p.surface_hover))
+            painter.drawRoundedRect(r, RADIUS["card"], RADIUS["card"])
+        if self.hasFocus():
+            pen = QPen(QColor(p.focus))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), RADIUS["card"], RADIUS["card"])
+        colour = (p.text if self.underMouse() else p.text_secondary) if enabled else p.text_tertiary
+        size = self._ICON
+        top = SPACE["s"]
+        painter.drawImage(QRectF((self.width() - size) / 2, top, size, size),
+                          icons.image(self._icon, colour, size, self.devicePixelRatioF()))
+        painter.setFont(theme.ui_font("caption", QFont.Weight.Medium))
+        painter.setPen(QColor(colour))
+        painter.drawText(QRectF(0, top + size + SPACE["xs"], self.width(),
+                                self.height() - top - size - SPACE["xs"] - SPACE["xs"]),
+                         Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignTop,
+                         painter.fontMetrics().elidedText(self.text(),
+                                                          Qt.TextElideMode.ElideRight,
+                                                          self.width() - SPACE["s"]))
+
+
+class CoffeeButton(QAbstractButton):
+    """"Buy me a coffee": a small warm pill with a cup, the app's one touch of colour. Opens the
+    support page."""
+
+    def __init__(self, text: str = "Buy me a coffee", compact: bool = False, parent=None):
+        super().__init__(parent)
+        self._compact = compact  # the status bar's smaller type
+        self.setText(text)
+        self.setToolTip(f"TrayTrim is free. If it saves you time, you can support it: "
+                        f"{SUPPORT_URL}")
+        self.setAccessibleName(f"{text} (opens buymeacoffee.com)")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover)  # repaints on hover
+        self.clicked.connect(lambda: system.open_url(SUPPORT_URL))
+
+    def _font(self) -> QFont:
+        return theme.ui_font("caption" if self._compact else "body", QFont.Weight.Medium)
+
+    def sizeHint(self) -> QSize:  # noqa: N802
+        metrics = QFontMetrics(self._font())
+        icon = 14 if self._compact else 18
+        pad = SPACE["s"] if self._compact else SPACE["m"]
+        height = max(icon, metrics.height()) + (SPACE["xs"] if self._compact else SPACE["s"]) * 2
+        return QSize(pad + icon + SPACE["xs"] + 2 + metrics.horizontalAdvance(self.text()) + pad,
+                     height)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802
+        p = theme.current()
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        r = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(p.coffee_hover if self.underMouse() or self.isDown() else p.coffee_bg))
+        painter.drawRoundedRect(r, r.height() / 2, r.height() / 2)
+        if self.hasFocus():
+            pen = QPen(QColor(p.focus))
+            pen.setWidth(2)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(r.adjusted(1, 1, -1, -1), r.height() / 2 - 1, r.height() / 2 - 1)
+        icon = 14 if self._compact else 18
+        pad = SPACE["s"] if self._compact else SPACE["m"]
+        painter.drawImage(QRectF(pad, (self.height() - icon) / 2, icon, icon),
+                          icons.image("coffee", p.coffee_text, icon, self.devicePixelRatioF()))
+        painter.setFont(self._font())
+        painter.setPen(QColor(p.coffee_text))
+        painter.drawText(QRectF(pad + icon + SPACE["xs"] + 2, 0, self.width(), self.height()),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, self.text())

@@ -14,29 +14,32 @@ from PySide6.QtWidgets import (QApplication, QButtonGroup, QDialog, QFileDialog,
                                QHBoxLayout, QLineEdit, QMainWindow, QPushButton, QSizePolicy,
                                QStackedWidget, QStatusBar, QVBoxLayout, QWidget)
 
-from traytrim import SUPPORT_URL, paths, tray
-from traytrim.gui.gallery import PORTRAIT, TrayList
+from traytrim import paths, tray
+from traytrim.gui.gallery import PORTRAIT, TrayList, sorts_for
 from traytrim.gui.describe import THUMB_TYPES
 from traytrim.gui.household_view import HouseholdReport, HouseholdView
-from traytrim.gui.report_parts import MAX_CARDS, THUMB
+from traytrim.gui.cc_view import THUMB
+from traytrim.gui.report_parts import MAX_CARDS
 from traytrim.gui.images import load_portraits, load_thumbnails, load_tray_pictures
 from traytrim.gui.index_status import IndexController, IndexStatus, SkippedPackagesDialog
-from traytrim.gui import icons, system, theme
+from traytrim.gui import icons, theme
 from traytrim.gui.update_dialog import UpdateCheck, UpdateDialog
 from traytrim.gui.tasks import BackgroundTask, describe_error, run_in_background
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import DropOverlay, ElidedLabel, Spinner, label, link_button
+from traytrim.gui.widgets import (CoffeeButton, DropOverlay, ElidedLabel, FooterAction,
+                                  IconLabel, MenuButton, Spinner, label, link_button, set_role)
 from traytrim.index import ResourceIndex
 from traytrim.export import default_base_name
 from traytrim.gui.export_dialog import ExportDialog, ExportRequest
 from traytrim.batch import Choice
 from traytrim.gui.batch_dialog import BatchDialog
 from traytrim.gui.history_dialog import HistoryDialog
+from traytrim.gui.settings_dialog import SettingsDialog
 from traytrim.batch import locate_item, pick_sims, plan_refs, scoped_refs
 from traytrim.names import item_names
 from traytrim.resolve import Where
 from traytrim.settings import Settings
-from traytrim.gui.mods_list import ModsList, PackageRole
+from traytrim.gui.mods_list import MODS_SHOWS, MODS_SORTS, ModsList, PackageRole
 from traytrim.gui.package_view import PackageView
 from traytrim.gui.received_view import ReceivedView
 from traytrim.gui.describe import display_name
@@ -73,20 +76,29 @@ def _folder_stamp(folder: Path | None) -> int | None:
 class FolderStatus(QWidget):
     """One status-bar slot: "Mods  C:\\...\\Mods", or "Mods folder not found" with a way to fix it."""
 
-    def __init__(self, name: str, on_choose: Callable[[], None], parent=None):
+    def __init__(self, name: str, on_choose: Callable[[], None], needed_for: str = "",
+                 parent=None):
         super().__init__(parent)
         self._name = name
+        self._needed_for = needed_for  # what it's used for, said when it's missing
         lay = QHBoxLayout(self)
         lay.setContentsMargins(SPACE["s"], 0, SPACE["s"], 0)
         lay.setSpacing(SPACE["s"])
+        self._alert = IconLabel("alert", "warning_text", 16)
+        self._alert.hide()
         self._title = label(name, "caption")
         self._value = ElidedLabel("", "caption", max_width=320)
         self._choose = link_button("Choose folder")
         self._choose.clicked.connect(on_choose)
-        for w in (self._title, self._value, self._choose):
+        for w in (self._alert, self._title, self._value, self._choose):
             lay.addWidget(w)
 
     def set_path(self, path: Path | None) -> None:
+        missing = path is None
+        self._alert.setVisible(missing)
+        set_role(self._title, "warning" if missing else "caption")
+        self.setToolTip(f"Not found. {self._needed_for}" if missing and self._needed_for
+                        else "")
         if path is not None:
             self._title.setText(self._name)
             self._value.setText(str(path))
@@ -155,6 +167,7 @@ class MainWindow(QMainWindow):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(0)
         row.addWidget(self._build_sidebar())
+        self._update_batch_button()  # off, saying why, until the index and the Tray are read
         divider = QFrame(objectName="sidebarDivider")
         divider.setFixedWidth(1)
         row.addWidget(divider)
@@ -170,6 +183,7 @@ class MainWindow(QMainWindow):
         self.packages.export_item_requested.connect(self._export_item)
         self.packages.package_requested.connect(self._show_package_path)
         self.packages.tray_item_requested.connect(self._show_tray_item)
+        self.packages.thumbnails_wanted.connect(self._package_thumbnails)
         self.received = ReceivedView()
         self.received.closed.connect(self._close_received)
         self.right = QStackedWidget()
@@ -191,6 +205,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+E"), self, activated=self._export)
         QShortcut(QKeySequence("Ctrl+Shift+E"), self, activated=self._export_several)
         QShortcut(QKeySequence("Ctrl+H"), self, activated=self._show_history)
+        QShortcut(QKeySequence("Ctrl+,"), self, activated=self._show_settings)
         QShortcut(QKeySequence.StandardKey.Open, self, activated=self._choose_zip)
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, activated=self._leave_received)
         self._show_folders()
@@ -227,7 +242,10 @@ class MainWindow(QMainWindow):
         self.kind_tabs = self._kind_tabs()
         self.kind_tabs.setVisible(self._kind is not MODS)
         head.addWidget(self.kind_tabs)
-        self.mods_sort = self._mods_sort_tabs()
+        self.tray_order = self._tray_sort_row()
+        self.tray_order.setVisible(self._kind is not MODS)
+        head.addWidget(self.tray_order)
+        self.mods_sort = self._mods_sort_row()
         self.mods_sort.setVisible(self._kind is MODS)
         head.addWidget(self.mods_sort)
         col.addLayout(head)
@@ -235,6 +253,7 @@ class MainWindow(QMainWindow):
 
         self.sidebar_stack = QStackedWidget()
         self.trays = TrayList()
+        self.trays.proxy.set_sort(self.tray_sort.current)
         self.trays.item_selected.connect(self._item_selected)
         self.trays.clicked.connect(self._leave_received)
         state = QWidget()
@@ -249,7 +268,8 @@ class MainWindow(QMainWindow):
         state_col.addWidget(self.tray_state_body)
         state_col.addStretch(1)
         self.mods_list = ModsList()
-        self.mods_list.set_by_size(self.settings.mods_sort == "size")
+        self.mods_list.set_sort(self.settings.mods_sort)
+        self.mods_list.set_show(self.settings.mods_show)
         self.mods_list.package_selected.connect(self._package_chosen)
         # Clicking the item that's already chosen also leaves a zip being checked.
         self.mods_list.clicked.connect(self._mods_clicked)
@@ -262,25 +282,24 @@ class MainWindow(QMainWindow):
         line = QFrame(objectName="divider")
         line.setFixedHeight(1)
         col.addWidget(line)
+        # The sidebar's tools, as tiles: an icon over a short name; the tooltip says more.
         foot = QHBoxLayout()
-        foot.setContentsMargins(SPACE["l"], 0, SPACE["l"], SPACE["m"])
-        self.batch_button = link_button("Export several")
-        self.batch_button.setToolTip("Export several at once, one zip each or together "
-                                     "(Ctrl+Shift+E)")
+        foot.setContentsMargins(SPACE["s"], SPACE["xs"], SPACE["s"], SPACE["s"])
+        foot.setSpacing(SPACE["xs"])
+        self.batch_button = FooterAction(
+            "layers", "Export several", "Export several at once, one zip each or together "
+            "(Ctrl+Shift+E)")
         self.batch_button.clicked.connect(self._export_several)
         self.batch_button.setEnabled(False)
-        check = link_button("Check a zip")
-        check.setToolTip("Open a zip someone sent you and see if it works in your game, "
-                         "before installing it (Ctrl+O). You can also drop a zip on the window.")
+        check = FooterAction(
+            "shield-check", "Check a zip", "Open a zip someone sent you and see if it works in "
+            "your game, before installing it (Ctrl+O). You can also drop a zip on the window.")
         check.clicked.connect(self._choose_zip)
-        history = link_button("Export history")
-        history.setToolTip("Earlier exports, and checking them again (Ctrl+H)")
+        history = FooterAction("history", "History",
+                               "Earlier exports: where they are, and checking them again (Ctrl+H)")
         history.clicked.connect(self._show_history)
-        foot.addWidget(self.batch_button)
-        foot.addStretch(1)
-        foot.addWidget(check)
-        foot.addStretch(1)
-        foot.addWidget(history)
+        for action in (self.batch_button, check, history):
+            foot.addWidget(action, 1)
         col.addLayout(foot)
         return side
 
@@ -306,6 +325,13 @@ class MainWindow(QMainWindow):
             row.addWidget(b)
             self._section_buttons[name] = b
         row.addStretch(1)
+        self.settings_button = QPushButton()
+        self.settings_button.setProperty("kind", "icon")
+        self.settings_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.settings_button.setToolTip("Settings (Ctrl+,)")
+        self.settings_button.setAccessibleName("Settings")
+        self.settings_button.clicked.connect(self._show_settings)
+        row.addWidget(self.settings_button, 0, Qt.AlignmentFlag.AlignVCenter)
         return box
 
     def _set_section(self, name: str) -> None:
@@ -314,29 +340,49 @@ class MainWindow(QMainWindow):
         elif self._kind is MODS:
             self._set_kind(self._last_tray_kind)
 
-    def _mods_sort_tabs(self) -> QWidget:
+    def _tray_sort_row(self) -> QWidget:
+        """How the households, lots or rooms are ordered."""
         box = QWidget()
         row = QHBoxLayout(box)
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        group = QButtonGroup(box)
-        by_size_now = self.settings.mods_sort == "size"
-        for i, (text, by_size) in enumerate((("A to Z", False), ("Largest first", True))):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setChecked(by_size == by_size_now)
-            b.setProperty("kind", "segment")
-            b.setProperty("position", "first" if i == 0 else "last")
+        kind = self._kind if self._kind is not MODS else KINDS[0]
+        self.tray_sort = MenuButton("Sort", sorts_for(kind[1]), self.settings.tray_sort)
+        self.tray_sort.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.tray_sort.chosen.connect(self._set_tray_sort)
+        row.addWidget(self.tray_sort)
+        return box
+
+    def _set_tray_sort(self, sort_by: str) -> None:
+        self.trays.set_sort(sort_by)
+        self.settings.tray_sort = sort_by  # saved with the window
+
+    def _mods_sort_row(self) -> QWidget:
+        """How the Mods packages are ordered, and which are listed."""
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(SPACE["s"])
+        self.mods_order = MenuButton("Sort", MODS_SORTS, self.settings.mods_sort)
+        self.mods_order.chosen.connect(self._set_mods_sort)
+        self.mods_show = MenuButton("Show", MODS_SHOWS, self.settings.mods_show)
+        self.mods_show.chosen.connect(self._set_mods_show)
+        for b in (self.mods_order, self.mods_show):
             b.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-            b.setAccessibleName(f"Sort packages: {text.lower()}")
-            b.clicked.connect(lambda _c=False, s=by_size: self._set_mods_sort(s))
-            group.addButton(b)
             row.addWidget(b)
         return box
 
-    def _set_mods_sort(self, by_size: bool) -> None:
-        self.mods_list.set_by_size(by_size)
-        self.settings.mods_sort = "size" if by_size else "name"  # saved with the window
+    def _set_mods_sort(self, sort_by: str) -> None:
+        self.mods_list.set_sort(sort_by)
+        self.settings.mods_sort = sort_by  # saved with the window
+        if self.mods_list.currentIndex().isValid():
+            self.mods_list.scrollTo(self.mods_list.currentIndex())
+        else:
+            self.mods_list.scrollToTop()
+
+    def _set_mods_show(self, show: str) -> None:
+        self.mods_list.set_show(show)
+        self.settings.mods_show = show
+        self._mods_search_changed(self.search.text())
 
     def _kind_tabs(self) -> QWidget:
         box = QWidget()
@@ -371,9 +417,15 @@ class MainWindow(QMainWindow):
             self._kind_buttons[kind[0]].setChecked(True)
         self._section_buttons["Mods" if kind is MODS else "Tray"].setChecked(True)
         self.kind_tabs.setVisible(kind is not MODS)
+        self.tray_order.setVisible(kind is not MODS)
         self.mods_sort.setVisible(kind is MODS)
+        if kind is not MODS:
+            self.tray_sort.set_options(sorts_for(kind[1]), self.settings.tray_sort)
+            if self.tray_sort.current != self.trays.proxy.sort_by:  # "Most Sims" for a lot
+                self.trays.set_sort(self.tray_sort.current)
         self.settings.tray_kind = kind[0]
         self._update_search_hint()
+        self._refresh_overview()  # "Pick a lot on the left"
         self._show_right()
         if kind is MODS:
             self._enter_mods()
@@ -394,17 +446,19 @@ class MainWindow(QMainWindow):
     def _build_status_bar(self) -> None:
         bar = QStatusBar()
         bar.setSizeGripEnabled(False)
-        self.user_status = FolderStatus("Sims 4", self._choose_user_dir)
-        self.game_status = FolderStatus("Game", self._choose_game_dir)
+        self.user_status = FolderStatus(
+            "Sims 4", self._choose_user_dir,
+            "It holds your Mods and Tray folders, usually Documents/Electronic Arts/The Sims 4.")
+        self.game_status = FolderStatus(
+            "Game", self._choose_game_dir,
+            "TrayTrim reads the game to tell its own items from CC and to know which packs the "
+            "CC needs; without it every EA item looks missing. Choose the folder The Sims 4 is "
+            "installed in.")
         self.index_status = IndexStatus(self._show_skipped, self._refresh_index)
         bar.addWidget(self.user_status)
         bar.addPermanentWidget(self.index_status)
         bar.addPermanentWidget(self.game_status)
-        coffee = link_button("Buy me a coffee")
-        coffee.setToolTip(f"TrayTrim is free. If it saves you time, you can support it: "
-                          f"{SUPPORT_URL}")
-        coffee.setAccessibleName("Buy me a coffee (opens buymeacoffee.com)")
-        coffee.clicked.connect(lambda: system.open_url(SUPPORT_URL))
+        coffee = CoffeeButton(compact=True)
         coffee_box = QWidget()
         coffee_row = QHBoxLayout(coffee_box)
         coffee_row.setContentsMargins(SPACE["s"], 0, SPACE["l"], 0)
@@ -447,6 +501,7 @@ class MainWindow(QMainWindow):
                 f"{len(failed)} tray items couldn't be read and are left out.", 10_000)
         self._tray_ready = True
         self._tray_stamp = _folder_stamp(self.folders.tray)
+        self._refresh_overview()
         self._update_search_enabled()
         self._search_changed(self.search.text())
         self._load_gallery_images(gen, list(self.trays.source.items))
@@ -484,10 +539,12 @@ class MainWindow(QMainWindow):
                                else self._tray_ready)
 
     def _set_tray_state(self, title: str, body: str, loading: bool = False) -> None:
-        """The Tray folder's state in place of the gallery (shown when a Tray tab is open)."""
+        """The Tray folder's state in place of the gallery (shown when a Tray tab is open),
+        and in the overview."""
         self._tray_state = (title, body, loading)
         if self._kind is not MODS:
             self._show_state(title, body, loading)
+        self._refresh_overview()
 
     def _show_state(self, title: str, body: str, loading: bool = False) -> None:
         self.tray_state_spinner.setVisible(loading)
@@ -500,6 +557,12 @@ class MainWindow(QMainWindow):
         p = theme.current()
         self._search_icon.setIcon(icons.icon("search", p.text_tertiary, 16))
         self._clear_action.setIcon(icons.icon("clear", p.text_secondary, 16))
+        if hasattr(self, "settings_button"):
+            self.settings_button.setIcon(icons.icon("settings", p.text_secondary, 20))
+        for name in ("tray_sort", "mods_order", "mods_show"):  # not built yet at the start
+            button = getattr(self, name, None)
+            if button is not None:
+                button.refresh_theme()
 
     def changeEvent(self, event) -> None:  # noqa: N802
         if event.type() == QEvent.Type.ActivationChange and self.isActiveWindow():
@@ -554,10 +617,45 @@ class MainWindow(QMainWindow):
         self._selected = item
         self._analysis_gen += 1
         if item is None:
-            self.household.show_message("Nothing selected", "Pick a household, lot or room on "
-                                        "the left to see which CC it uses.")
+            self._show_overview()
             return
         self._analyse()
+
+    def _show_overview(self) -> None:
+        """Nothing picked: what TrayTrim found, and the ways to start."""
+        items = self.trays.source.items
+        stats = []
+        if self._tray_ready:
+            for kind in KINDS[:3]:
+                n = sum(1 for i in items if i.type == kind[1])
+                stats.append((f"{n:,}", kind[3] if n != 1 else kind[3][:-1]))
+        result = self.index.last_result
+        if result is not None:
+            stats.append((f"{result.mods_packages:,}", "Mods packages"))
+        kind = self._kind if self._kind is not MODS else self._last_tray_kind
+        if self._tray_ready:
+            title = f"Pick a {kind[0]} on the left"
+            line = ("See the CC it uses, how small its export is, and what's missing or "
+                    "needed besides, then export it with only that CC.")
+        else:  # reading it, not found, or unreadable: what the sidebar says too
+            title, line = self._tray_state[0] or "Reading your Tray folder", self._tray_state[1]
+        can_batch = self._index_ready and bool(items)
+        actions = [
+            ("layers", "Export several", "One zip each, or several together in one zip "
+             "(Ctrl+Shift+E)." if can_batch else "Once the index of your Mods is ready.",
+             self._export_several, can_batch),
+            ("shield-check", "Check a zip", "See whether a zip someone sent you works in your "
+             "game, before installing it (Ctrl+O).", self._choose_zip, True),
+            ("history", "Export history", "Find earlier exports and check them again (Ctrl+H).",
+             self._show_history, True),
+        ]
+        self.household.show_overview(title, line, stats, actions,
+                                     "You can also drop a zip anywhere on the window to check "
+                                     "it. Nothing is installed or changed.")
+
+    def _refresh_overview(self) -> None:
+        if self._selected is None and self.household.showing_overview():
+            self._show_overview()
 
     def _sims_changed(self, sim_ids: set[int]) -> None:
         if self._selected is None:
@@ -755,7 +853,12 @@ class MainWindow(QMainWindow):
         self._run_dialog(ExportDialog(request, self.settings, self))
 
     def _update_batch_button(self) -> None:
-        self.batch_button.setEnabled(self._index_ready and bool(self.trays.source.items))
+        ready = self._index_ready and bool(self.trays.source.items)
+        self.batch_button.setEnabled(ready)
+        self.batch_button.setToolTip(
+            "Export several at once, one zip each or together (Ctrl+Shift+E)" if ready
+            else "Export several at once, once the index of your Mods and game is ready and "
+            "your Tray has something in it.")
 
     def _export_several(self) -> None:
         items = list(self.trays.source.items)
@@ -774,6 +877,11 @@ class MainWindow(QMainWindow):
     def _show_history(self) -> None:
         self._run_dialog(HistoryDialog(self._open_zip, self))
 
+    def _show_settings(self) -> None:
+        self._run_dialog(SettingsDialog(
+            self.settings, lambda: (self.folders.user_dir, self.folders.game_dir),
+            self._choose_user_dir, self._choose_game_dir, self._refresh_index, self))
+
     @staticmethod
     def _run_dialog(dialog) -> None:
         """Show a dialog and free it afterwards (a parented dialog otherwise lives on)."""
@@ -791,6 +899,7 @@ class MainWindow(QMainWindow):
                                         describe_error(error))
 
     def _index_finished(self, result) -> None:
+        QTimer.singleShot(0, self._refresh_overview)  # its Mods count, once this is done
         tray_changed, self._tray_dirty = self._tray_dirty, False
         if self._index_ready and not result.changed:
             if tray_changed:  # only the Tray: what uses what is worked out again
@@ -913,9 +1022,16 @@ class MainWindow(QMainWindow):
                              "Packages the game loads from Mods show up here.")
         elif self.mods_list.visible_count():
             self.sidebar_stack.setCurrentWidget(self.mods_list)
+        elif not text.strip():  # only the Show choice hides them
+            self._show_state("No packages like that",
+                             f"None of your packages is listed under \u201c"
+                             f"{next(o[1] for o in MODS_SHOWS if o[0] == self.mods_show.current)}"
+                             "\u201d. Choose All in Show to list them all.")
         else:
             self._show_state(f"Nothing matches \u201c{text.strip()}\u201d",
-                             "Search looks at package names and their folders in Mods.")
+                             "Search looks at package names and their folders in Mods."
+                             + ("" if self.mods_show.current == "all" else
+                                " Only the packages Show picks are searched."))
 
     def _start_usage(self) -> None:
         """Work out what needs what (references between packages, and which tray items use
@@ -1047,15 +1163,18 @@ class MainWindow(QMainWindow):
         run_in_background(work, done, failed)
 
     def _load_package_extras(self, report) -> None:
-        """Names and thumbnails of the items in a package, read off the UI thread."""
+        """Names of the items in a package, read off the UI thread (thumbnails are read as
+        their cards are shown, see _package_thumbnails)."""
         refs, path = report.items, report.path
         if not refs:
             return
         run_in_background(lambda: item_names(refs),
                           lambda names: self.packages.set_names(path, names), lambda _e: None)
-        if len(refs) <= MAX_CARDS:  # a bigger package is shown as a list, without pictures
-            self._load_thumbnails(refs,
-                                  lambda images: self.packages.set_thumbnails(path, images, True))
+
+    def _package_thumbnails(self, path: Path, refs: list) -> None:
+        tried = {r.ref.instance for r in refs}
+        self._load_thumbnails(refs, lambda images: self.packages.set_thumbnails(path, images,
+                                                                                tried))
 
     def _load_package_usage(self) -> None:
         report, usage, gen = self.packages.report, self._usage, self._package_gen
@@ -1083,9 +1202,12 @@ class MainWindow(QMainWindow):
 
     def _show_package_path(self, path: Path) -> None:
         """Open another package (a "needs files from it" link)."""
-        if not self.mods_list.select_path(path):
+        if not self.mods_list.select_path(path):  # hidden by the search or by Show
             self.search.clear()
-            self.mods_list.select_path(path)
+            if not self.mods_list.select_path(path) and self.mods_show.current != "all":
+                self.mods_show.set_options(MODS_SHOWS, "all")
+                self._set_mods_show("all")
+                self.mods_list.select_path(path)
 
     def _show_tray_item(self, item: tray.TrayItem) -> None:
         """Open a tray item (a "Used by" link): its tab, with the search cleared."""

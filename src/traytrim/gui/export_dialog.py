@@ -100,7 +100,7 @@ class ExportDialog(QDialog):
         col.addLayout(grid)
         col.addSpacing(SPACE["s"])
         self.kit_chip = SimChip("Also make an in-game test kit")
-        self.kit_chip.setChecked(True)
+        self.kit_chip.setChecked(self.settings.export_test_kit)  # the default, from Settings
         self.kit_chip.setAccessibleName("Also make an in-game test kit")
         self.kit_chip.setToolTip("A folder with only the exported packages and steps to try the "
                                  f"{noun} in your game with nothing else installed.")

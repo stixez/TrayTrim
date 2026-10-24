@@ -6,19 +6,20 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QCursor, QGuiApplication, QImage
-from PySide6.QtWidgets import (QButtonGroup, QFrame, QHBoxLayout, QLineEdit, QMenu,
-                               QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QFrame, QHBoxLayout, QMenu, QScrollArea, QStackedWidget,
+                               QVBoxLayout, QWidget)
 
 from traytrim import restypes
-from traytrim.gui import icons, theme
-from traytrim.gui.describe import (THUMB_TYPES, card_caption, display_name, group_refs,
-                                   item_label, item_subtitle, plural, usage_summary, usage_text)
-from traytrim.gui.report_parts import (MAX_CARDS, CcCard, Hero, PagedCcList, Picture, Section,
-                                       first_items, item_menu)
+from traytrim.gui.cc_view import MAX_THUMBNAILS as CC_MAX_THUMBNAILS
+from traytrim.gui.cc_view import TOGGLE, CcBrowser, CcState
+from traytrim.gui.describe import (display_name, item_label, item_subtitle, plural, usage_summary,
+                                   usage_text)
+from traytrim.gui.report_parts import Hero, Picture, StickyBar, item_menu
+from traytrim.gui.overview import Overview
 from traytrim.gui.theme import SPACE
-from traytrim.gui.widgets import LoadingPanel, Notice, ShowMore, SimChip, label, link_button
+from traytrim.gui.widgets import LoadingPanel, Notice, SimChip, label
 from traytrim.names import ItemName
 from traytrim.plan import Plan, PlannedResource
 from traytrim.resolve import LocatedRef, Summary, ref_label, summarize
@@ -40,9 +41,7 @@ class HouseholdReport:
         return self.contents.kind  # "household", "lot" or "room"
 
 
-PAGE_CARDS = MAX_CARDS  # cards built at a time
-# Pictures kept in memory: ~600 x 248 x 248 px x 4 bytes, about 150 MB.
-MAX_THUMBNAILS = 600
+MAX_THUMBNAILS = CC_MAX_THUMBNAILS  # here so a test can lower it for this view
 
 
 class HouseholdView(QWidget):
@@ -55,44 +54,32 @@ class HouseholdView(QWidget):
     export_item_requested = Signal(object, object)  # LocatedRef, ItemName or None
     thumbnails_wanted = Signal(object, list)  # tray item (64-bit), refs of cards on screen
 
-    SORTS = (("category", "Category"), ("size", "Size"), ("name", "Name"))
-
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("content")
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground)
-        self._mode = "cards"
+        # How the CC is shown (cards or list, and the sort), kept from item to item.
+        self._view = "cards"
         self._sort = "category"
-        self._query = ""  # as typed; matching ignores outer spaces
+        self.browser: CcBrowser | None = None
+        self._state: CcState | None = None
+        self._browser_item: int | None = None  # the tray item the browser on screen is for
         self._names: dict[TrayRef, ItemName] = {}
-        # Size order, fixed once worked out: leaving an item out mustn't move its card.
-        self._size_rank: dict[TrayRef, int] | None = None
         self._plan_error: tuple[str, object] | None = None  # reason, retry
         self._expanded: set[str] = set()  # notices whose details are open
-        self._search: QLineEdit | None = None
-        self._list: PagedCcList | None = None
         self._pictures: dict[int, QImage] = {}  # tray item -> its own picture
         self._head: QHBoxLayout | None = None
         self._head_picture: Picture | None = None
         self._report: HouseholdReport | None = None
         self._plan: Plan | None = None
         self._gameplay: list = []
-        self._cards: dict[int, list[CcCard]] = {}
-        self._all_cards: list[CcCard] = []
-        self._sections: list[Section] = []
         # Loaded thumbnails, the most recently shown last. Kept across households (going back
         # to one shows its pictures at once), up to MAX_THUMBNAILS: browsing many households
         # would otherwise keep every picture ever seen.
         self._thumbs: OrderedDict[int, QImage] = OrderedDict()
-        # Thumbnails are loaded for the cards on screen (a big lot shows a page at a time):
-        # asked for, and tried (asked and answered, with or without an image).
-        self._thumbs_asked: set[int] = set()
+        # Thumbnails are loaded for the cards painted on screen: tried means asked and
+        # answered, with or without an image.
         self._thumbs_tried: set[int] = set()
-        self._card_limit = PAGE_CARDS  # cards on screen when there are more than a page
-        self._groups: list[tuple[str, list[LocatedRef]]] = []
-        self._matching = 0
-        self._search_timer = QTimer(self, singleShot=True, interval=250)
-        self._search_timer.timeout.connect(self._rebuild)
         self._theme_timer = QTimer(self, singleShot=True, interval=0)
         self._theme_timer.timeout.connect(self._rebuild)
 
@@ -103,19 +90,36 @@ class HouseholdView(QWidget):
         self.message_page = LoadingPanel()
         self.message_title, self.message_body = self.message_page.title, self.message_page.body
         self.stack.addWidget(self.message_page)
+        self.overview = Overview()
+        self.stack.addWidget(self.overview)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         # Never sideways: anything too wide wraps or is shortened instead.
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.stack.addWidget(self.scroll)
+        self.sticky = StickyBar(self.export_requested.emit, self.scroll)
+        self.scroll.verticalScrollBar().valueChanged.connect(self._update_sticky)
         self.show_message("Nothing selected",
                           "Pick a household, lot or room on the left to see which CC it uses.")
 
     # States
 
+    def show_overview(self, *args) -> None:
+        """Nothing picked: what's there and where to start (Overview.fill's arguments)."""
+        self.sticky.hide()
+        self._report = None
+        self._plan = None
+        self._gameplay = []
+        self.overview.fill(*args)
+        self.stack.setCurrentWidget(self.overview)
+
+    def showing_overview(self) -> bool:
+        return self.stack.currentWidget() is self.overview
+
     def show_message(self, title: str, body: str, loading: bool = False) -> None:
         """loading: a loader screen with a spinner, while the item is read."""
+        self.sticky.hide()
         self._report = None
         self._plan = None
         self._gameplay = []
@@ -127,10 +131,7 @@ class HouseholdView(QWidget):
                        and self._report.item.instance == report.item.instance)
         position = self.scroll.verticalScrollBar().value() if keep_scroll else 0
         if not keep_scroll:
-            self._card_limit = PAGE_CARDS
-            self._query = ""
             self._expanded.clear()
-            self._size_rank = None
         self._report = report
         self._plan = None
         self._plan_error = None
@@ -155,10 +156,7 @@ class HouseholdView(QWidget):
         self._plan_error = None
         if gameplay is not None:
             self._gameplay = gameplay
-        if self._sort == "size" and self._size_rank is None:
-            self._rebuild()  # the first sizes: now the order can be worked out
-        else:
-            self._apply_plan()
+        self._apply_plan()
 
     def plan_outdated(self) -> None:
         """The choices changed; nothing may export the plan on screen until the new one, and
@@ -184,53 +182,18 @@ class HouseholdView(QWidget):
             return
         self.hero.show_plan(plan)
         self._fill_plan_notices()
-        sizes = self._owner_sizes()
-        for card in self._all_cards:
-            card.set_size(sizes.get(card.ref.ref) if card.included else None)
-        excluded = self._report.excluded
-        for section in self._sections:
-            section.set_size(sum(sizes.get(x.ref, 0) for x in section.refs
-                                 if x.ref not in excluded))
+        if self.browser is not None:
+            self.browser.set_sizes(self._owner_sizes())
 
     def set_thumbnails(self, instance: int, images: dict[int, QImage],
                        tried: set[int]) -> None:
         """Thumbnails loaded for the instances `tried`; those without one get the
-        placeholder."""
-        self._thumbs.update(images)
-        self._thumbs_tried |= tried
-        self._forget_old_thumbnails()
-        if self._report is not None:  # whichever household is on screen: it may share them
-            self._show_thumbnails()
-
-    def _show_thumbnails(self) -> None:
-        for part, cards in self._cards.items():
-            if part in self._thumbs:
-                self._thumbs.move_to_end(part)  # on screen: the last to be forgotten
-            for card in cards:
-                if part in self._thumbs:
-                    card.thumb.set_image(self._thumbs[part])
-                elif part in self._thumbs_tried:
-                    card.thumb.set_missing()
-
-    def _forget_old_thumbnails(self) -> None:
-        """Drop the least recently shown pictures past MAX_THUMBNAILS, never one on screen. A
-        dropped one is loaded again if its card comes back."""
-        on_screen = set(self._cards)
-        for part in list(self._thumbs):
-            if len(self._thumbs) <= MAX_THUMBNAILS:
-                break
-            if part not in on_screen:
-                del self._thumbs[part]
-                self._thumbs_asked.discard(part)
-                self._thumbs_tried.discard(part)
-
-    def _ask_thumbnails(self) -> None:
-        """Ask for the thumbnails of the cards on screen that nobody asked for yet."""
-        wanted = [cards[0].ref for part, cards in self._cards.items()
-                  if part not in self._thumbs_asked]
-        if wanted and self._report is not None:
-            self._thumbs_asked |= {r.ref.instance for r in wanted}
-            self.thumbnails_wanted.emit(self._report.item.instance, wanted)
+        placeholder. Kept for whichever household is on screen: it may share them."""
+        state = self._state or CcState(TOGGLE, False, self._thumbs, self._thumbs_tried,
+                                       MAX_THUMBNAILS)
+        state.add_thumbnails(images, tried)
+        if self.browser is not None:
+            self.browser.repaint_items()
 
     def set_names(self, instance: int, names: dict[TrayRef, ItemName]) -> None:
         """Item names read from their packages arrive after the report is shown. Cards take
@@ -238,15 +201,8 @@ class HouseholdView(QWidget):
         self._names.update(names)
         if self._report is None or self._report.item.instance != instance or not names:
             return
-        if self._mode == "list" or self._sort == "name" or self._paged:
-            self._rebuild()
-            return
-        for card in self._all_cards:
-            card.set_name(self._names.get(card.ref.ref))
-        if self._sort == "category":
-            for section in self._sections:
-                section.reorder(lambda c: (item_label(c.ref), self._title(c.ref).casefold()))
-        self._apply_filter()
+        if self.browser is not None:
+            self.browser.refresh()
 
     def forget_names(self) -> None:
         """The Mods folder changed: names may have too."""
@@ -278,33 +234,34 @@ class HouseholdView(QWidget):
         """Rebuild what's painted from theme colours (icons, list colours). A theme switch
         sends several change events; they're folded into one rebuild that keeps the scroll
         position."""
+        self.sticky.refresh_theme()
+        self.overview.update()
         if not self._theme_timer.isActive():
             self._theme_timer.start()
 
     def _rebuild(self) -> None:
-        """Build the page again (theme, view, sort or names changed), keeping the scroll
-        position, the plan on screen and the keyboard focus: the search box (and its cursor),
-        the card or the control that had it, so keyboard users don't lose their place."""
+        """Build the page again (the theme changed), keeping the scroll position, the plan on
+        screen and the keyboard focus (by the control's name), so keyboard users don't lose
+        their place."""
         if self._report is None:
             return
         position = self.scroll.verticalScrollBar().value()
-        searching = self._search is not None and self._search.hasFocus()
-        cursor = self._search.cursorPosition() if searching else 0
         focus = self.window().focusWidget()  # also right while the window isn't active
         page = self.scroll.widget()
         on_page = focus is not None and page is not None and page.isAncestorOf(focus)
-        focused_ref = focus.ref.ref if on_page and isinstance(focus, CcCard) else None
-        focused_name = focus.accessibleName() if on_page and not focused_ref else ""
+        old = self.browser
+        focused_ref = old.focused_ref() if old is not None and on_page else None
+        searching = old is not None and old.search.hasFocus()
+        cursor = old.search.cursorPosition() if searching else 0
+        focused_name = focus.accessibleName() if on_page else ""
         self._build()
         self._apply_plan()
         self.scroll.verticalScrollBar().setValue(position)
-        if searching and self._search is not None:
-            self._search.setFocus()
-            self._search.setCursorPosition(cursor)
-        elif focused_ref is not None:
-            card = next((c for c in self._all_cards if c.ref.ref == focused_ref), None)
-            if card is not None:
-                card.setFocus()
+        if searching and self.browser is not None:
+            self.browser.search.setFocus()
+            self.browser.search.setCursorPosition(cursor)
+        elif focused_ref is not None and self.browser is not None:
+            self.browser.focus_item(focused_ref)
         elif focused_name:
             same = next((w for w in self.scroll.widget().findChildren(QWidget)
                          if w.accessibleName() == focused_name and w.isVisible()), None)
@@ -364,8 +321,10 @@ class HouseholdView(QWidget):
 
         col.addSpacing(SPACE["xl"])
         self.hero = Hero(self.export_requested.emit, r.noun)
+        self.hero.changed.connect(self._update_sticky)
         self.hero.show_working()
         col.addWidget(self.hero)
+        self.sticky.set_title(r.item.name or f"Unnamed {r.noun}")
 
         summary = summarize(r.refs)
         col.addSpacing(SPACE["l"])
@@ -383,199 +342,50 @@ class HouseholdView(QWidget):
         bar.addSpacing(SPACE["s"])
         bar.addWidget(self.excluded_label, 0, Qt.AlignmentFlag.AlignBaseline)
         bar.addStretch(1)
-        bar.addWidget(self._view_toggle())
         col.addLayout(bar)
         col.addSpacing(SPACE["xs"])
-        hint = ("Click an item to leave it out of the export, or right-click it to export it on "
-                "its own." if self._mode == "cards"
-                else "Switch to cards to choose what to leave out. Right-click an item to export "
-                "it on its own.")
+        hint = ("Click an item, or its tick in the list, to leave it out of the export; "
+                "right-click it to export it on its own.")
         col.addWidget(label(f"{self._source_line(summary)} {hint}", "secondary", wrap=True))
         col.addSpacing(SPACE["l"])
 
-        self._search, self._list = None, None
-        if summary.cc:
-            tools = QHBoxLayout()
-            tools.setSpacing(SPACE["m"])
-            search = QLineEdit(self._query)  # as typed, trailing space and all
-            search.setPlaceholderText("Search names and packages")
-            search.setAccessibleName("Search the CC")
-            search.setClearButtonEnabled(True)
-            search.setFixedWidth(280)
-            search.addAction(icons.icon("search", theme.current().text_tertiary, 16),
-                             QLineEdit.ActionPosition.LeadingPosition)
-            search.textChanged.connect(self._query_changed)
-            self._search = search
-            tools.addWidget(search)
-            self.match_label = label("", "secondary")
-            tools.addWidget(self.match_label)
-            tools.addSpacing(SPACE["s"])
-            for text, included in (("Include all", True), ("Leave all out", False)):
-                button = link_button(text)
-                button.setAccessibleName(text)  # so a rebuild gives the focus back
-                button.setToolTip(f"{'Put every item back in' if included else 'Leave every item out of'} "
-                                  "the export at once. While you search, only the items that "
-                                  "match.")
-                button.clicked.connect(lambda _c=False, i=included: self._set_all(i))
-                tools.addWidget(button)
-            tools.addStretch(1)
-            tools.addWidget(label("Sort by", "secondary"))
-            tools.addWidget(self._sort_toggle())
-            col.addLayout(tools)
-            col.addSpacing(SPACE["l"])
-            self.no_match = label("", "secondary", wrap=True)
-            self.no_match.hide()
-            col.addWidget(self.no_match)
-
-        groups = self._sorted_groups(summary.cc)
-        self._groups = groups
-        self._cards, self._all_cards, self._sections = {}, [], []
+        old = self.browser
+        same_item = old is not None and self._browser_item == r.item.instance
+        self.browser = self._state = None
         if not summary.cc:
             col.addWidget(label(f"This {r.noun} doesn't use any CC from your Mods folder.",
                                 "secondary", wrap=True))
-        elif self._mode == "cards":
-            # Up to a page of cards; past that, the search picks what's built (not just shown).
-            shown, full, whole = groups, {}, dict(groups)
-            if self._paged:
-                full = {t: [x for x in refs if self._matches(x)] for t, refs in groups}
-                shown = first_items([(t, refs) for t, refs in full.items() if refs],
-                                    self._card_limit)
-            for title, refs in shown:
-                cards = [CcCard(x, x.ref not in r.excluded, self._names.get(x.ref))
-                         for x in refs]
-                for card in cards:
-                    card.toggled.connect(self._card_toggled)
-                    card.menu_requested.connect(self._card_menu)
-                    self._all_cards.append(card)
-                    if card.ref.ref.kind in THUMB_TYPES:
-                        self._cards.setdefault(card.ref.ref.instance, []).append(card)
-                    else:
-                        card.thumb.set_missing()
-                section = Section(title, cards, refs=whole.get(title))
-                if self._paged:
-                    section.show_matching(len(full[title]))  # "3 of 40", as without pages
-                self._sections.append(section)
-                col.addWidget(section)
-            if self._paged:
-                self._matching = sum(len(refs) for refs in full.values())
-                more = ShowMore(self._matching, self._show_more_cards, PAGE_CARDS)
-                more.set_shown(len(self._all_cards))
-                col.addWidget(more)
-            self._show_thumbnails()
-            self._ask_thumbnails()
         else:
-            self._list = PagedCcList(
-                len(r.sim_ids) > 1, r.excluded, self._names,
-                lambda ref: self.export_item_requested.emit(ref, self._names.get(ref.ref)))
-            col.addWidget(self._list)
+            instance = r.item.instance
+            state = CcState(TOGGLE, len(r.sim_ids) > 1, self._thumbs, self._thumbs_tried,
+                            MAX_THUMBNAILS)
+            state.names = self._names
+            state.excluded = r.excluded  # the same set: what's left out is the report's
+            state.on_wanted = lambda refs: self.thumbnails_wanted.emit(instance, refs)
+            if self._plan is not None:
+                state.sizes = self._owner_sizes()
+            # The same item shown again (a Sim chosen, the theme changed) keeps its search
+            # and filters; another starts with none.
+            filters = old.filters() if same_item else ("", "all", "all")
+            browser = CcBrowser(summary.cc, state, view=self._view, sort=self._sort,
+                                placeholder="Search names, creators and packages",
+                                filters=filters, rank=old.rank() if same_item else None)
+            browser.toggled.connect(self._card_toggled)
+            browser.many_toggled.connect(lambda _refs, _included: self._exclusion_updated())
+            browser.menu_requested.connect(self._card_menu)
+            browser.view_changed.connect(self._remember_view)
+            self.browser, self._state = browser, state
+            self._browser_item = instance
+            col.addWidget(browser)
         col.addStretch(1)
         old = self.scroll.takeWidget()
         if old is not None:
             old.deleteLater()
         self.scroll.setWidget(page)
-        self._apply_filter()
 
-    @property
-    def _paged(self) -> bool:
-        """More CC than one page of cards: they're built a page at a time."""
-        return self._report is not None and len(self._summary.cc) > PAGE_CARDS
-
-    def _show_more_cards(self) -> None:
-        first_new = len(self._all_cards)
-        self._card_limit += PAGE_CARDS
-        self._rebuild()
-        if first_new < len(self._all_cards):  # keyboard focus goes to where the list goes on
-            card = self._all_cards[first_new]
-            card.setFocus()
-            QTimer.singleShot(0, lambda: self.scroll.ensureWidgetVisible(card, 0, SPACE["xl"]))
-
-    # Search and sort
-
-    def _title(self, ref: LocatedRef) -> str:
-        return display_name(ref, self._names.get(ref.ref))
-
-    def _sorted_groups(self, refs: list[LocatedRef]) -> list[tuple[str, list[LocatedRef]]]:
-        if self._sort == "size":
-            if self._size_rank is None and self._plan is not None:
-                sizes = self._owner_sizes()
-                ranked = sorted(refs, key=lambda x: (-sizes.get(x.ref, 0),
-                                                     self._title(x).casefold()))
-                self._size_rank = {x.ref: i for i, x in enumerate(ranked)}
-            rank = self._size_rank or {}
-            ordered = sorted(refs, key=lambda x: (rank.get(x.ref, len(rank)),
-                                                  self._title(x).casefold()))
-            return [("Largest first", ordered)]
-        if self._sort == "name":
-            return [("A to Z", sorted(refs, key=lambda x: self._title(x).casefold()))]
-        return group_refs(refs, self._title)
-
-    def _matches(self, ref: LocatedRef) -> bool:
-        if not self._query.strip():
-            return True
-        name = self._names.get(ref.ref)
-        haystack = " ".join([self._title(ref), name.creator if name else "",
-                             name.raw if name else "", ref.used.rel if ref.used else "",
-                             item_label(ref), card_caption(ref)]).casefold()
-        return all(word in haystack for word in self._query.casefold().split())
-
-    def _query_changed(self, text: str) -> None:
-        self._query = text
-        if self._mode == "cards" and self._paged:
-            self._card_limit = PAGE_CARDS
-            self._search_timer.start()  # cards are built for the matches: wait for a pause
-        else:
-            self._apply_filter()
-
-    def _apply_filter(self) -> None:
-        if self._search is None:
-            return
-        total = len(self._summary.cc)
-        if self._list is not None:  # the matches, a page at a time
-            self._list.set_groups([(t, [x for x in refs if self._matches(x)])
-                                   for t, refs in self._groups])
-            shown = self._list.total
-        elif self._paged:  # only matching cards were built
-            shown = self._matching
-        else:
-            shown = 0
-            for section in self._sections:
-                matching = 0
-                for card in section.cards:
-                    ok = self._matches(card.ref)
-                    card.setVisible(ok)
-                    matching += ok
-                section.show_matching(matching)
-                shown += matching
-        query = self._query.strip()
-        self.match_label.setText(f"{shown} of {total}" if query else "")
-        self.no_match.setText(f"Nothing matches \u201c{self._query}\u201d. Search looks at "
-                              "names, creators and packages.")
-        self.no_match.setVisible(bool(query) and shown == 0)
-
-    def _sort_toggle(self) -> QWidget:
-        box = QWidget()
-        row = QHBoxLayout(box)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        group = QButtonGroup(box)
-        for i, (key, text) in enumerate(self.SORTS):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setChecked(self._sort == key)
-            b.setProperty("kind", "segment")
-            b.setProperty("position", "first" if i == 0 else
-                          "last" if i == len(self.SORTS) - 1 else "middle")
-            b.setAccessibleName(f"Sort by {text.lower()}")
-            b.clicked.connect(lambda _c=False, k=key: self._set_sort(k))
-            group.addButton(b)
-            row.addWidget(b)
-        return box
-
-    def _set_sort(self, key: str) -> None:
-        if key != self._sort and self._report is not None:
-            self._sort = key
-            self._size_rank = None  # choosing Size orders by the sizes as they are now
-            self._rebuild()
+    def _remember_view(self) -> None:
+        if self.browser is not None and self._report is not None:
+            self._view, self._sort = self.browser.view, self.browser.sort
 
     @staticmethod
     def _source_line(s: Summary) -> str:
@@ -595,9 +405,10 @@ class HouseholdView(QWidget):
 
     def _notice(self, key: str, *args, **kwargs) -> Notice:
         """A notice whose details stay open across rebuilds once the user opened them."""
-        return Notice(*args, expanded=key in self._expanded,
-                      on_expand=lambda shown: (self._expanded.add(key) if shown
-                                               else self._expanded.discard(key)), **kwargs)
+        return _compact_notice(*args, expanded=key in self._expanded,
+                               on_expand=lambda shown: (self._expanded.add(key) if shown
+                                                        else self._expanded.discard(key)),
+                               **kwargs)
 
     def _copy_to_clipboard(self, lines: list[str], button) -> None:
         QGuiApplication.clipboard().setText("\n".join(lines) + "\n")
@@ -688,7 +499,7 @@ class HouseholdView(QWidget):
             n = len(r.overrides)
             details = [(item_label(x), display_name(x, self._names.get(x.ref)),
                         x.used.rel if x.used else "") for x in s.cc if x.ref in r.overrides]
-            self._add_notice(Notice(
+            self._add_notice(_compact_notice(
                 "info", "text_secondary",
                 f"Your mods change {plural(n, 'EA item')} this {r.noun} uses",
                 "Mostly to unlock or retune them, which rarely changes how it looks. Exported, "
@@ -696,7 +507,7 @@ class HouseholdView(QWidget):
                 f"game, so {'it starts' if n == 1 else 'they start'} out of the export. To "
                 "include one, click its card (marked Not exported).", details), "tray")
         for note in (r.contents.sims[0].notes if r.contents.sims else []):
-            self._add_notice(Notice("info", "text_secondary", "Partly read", note), "tray")
+            self._add_notice(_compact_notice("info", "text_secondary", "Partly read", note), "tray")
 
     def _fill_plan_notices(self) -> None:
         self._clear_notices("plan")
@@ -764,7 +575,7 @@ class HouseholdView(QWidget):
                 body = ("You included EA items in a version changed by your Mods. They're "
                         "exported as they are, which changes them everywhere in the "
                         "recipient's game.")
-            self._add_notice(Notice(
+            self._add_notice(_compact_notice(
                 "info", "text_secondary",
                 f"{plural(n, 'item')} {'replaces' if n == 1 else 'replace'} game content",
                 body, details), "plan")
@@ -779,7 +590,7 @@ class HouseholdView(QWidget):
                 users, who, what = f"the {r.noun}", f"The {r.noun} uses", "lot traits"
             details = [(m.rel, plural(m.ids, "id") + f" used by {users}", m.rel)
                        for m in self._gameplay]
-            self._add_notice(Notice(
+            self._add_notice(_compact_notice(
                 "info", "text_secondary",
                 f"{plural(n, 'gameplay mod')} {'is' if n == 1 else 'are'} also needed",
                 f"{who} {what} from these mods. They can't be trimmed, so they're not "
@@ -789,35 +600,12 @@ class HouseholdView(QWidget):
             n = len(plan.unreadable)
             details = [(restypes.name(k.type), Path(p).name, reason)
                        for k, p, reason in plan.unreadable]
-            self._add_notice(Notice(
+            self._add_notice(_compact_notice(
                 "alert", "danger_text", f"{plural(n, 'file')} couldn't be read",
                 "Their own references couldn't be followed, so something they need may be "
                 "missing from the export.", details), "plan")
 
     # Interaction
-
-    def _view_toggle(self) -> QWidget:
-        box = QWidget()
-        row = QHBoxLayout(box)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(0)
-        group = QButtonGroup(box)
-        for i, (mode, text) in enumerate((("cards", "Cards"), ("list", "List"))):
-            b = QPushButton(text)
-            b.setCheckable(True)
-            b.setChecked(self._mode == mode)
-            b.setProperty("kind", "segment")
-            b.setProperty("position", "first" if i == 0 else "last")
-            b.setAccessibleName(f"Show CC as {text.lower()}")
-            b.clicked.connect(lambda _c=False, m=mode: self._set_mode(m))
-            group.addButton(b)
-            row.addWidget(b)
-        return box
-
-    def _set_mode(self, mode: str) -> None:
-        if mode != self._mode and self._report is not None:
-            self._mode = mode
-            self._rebuild()
 
     def _chip_toggled(self) -> None:
         chosen = {c.property("sim_id") for c in self._chips if c.isChecked()}
@@ -830,49 +618,53 @@ class HouseholdView(QWidget):
             return
         self.sims_changed.emit(chosen)
 
-    def _card_menu(self, card: CcCard, pos) -> None:
-        item_menu(self, pos, lambda: self.export_item_requested.emit(card.ref, card.name))
+    def _card_menu(self, ref: LocatedRef, pos) -> None:
+        item_menu(self, pos, lambda: self.export_item_requested.emit(ref,
+                                                                     self._names.get(ref.ref)))
 
-    def _card_toggled(self, ref: TrayRef, included: bool) -> None:
-        r = self._report
-        if r is None:
-            return
-        if included:
-            r.excluded.discard(ref)
-        else:
-            r.excluded.add(ref)
-        self._exclusion_updated()
-
-    def _set_all(self, included: bool) -> None:
-        """Include all, or Leave all out: every CC item, or the ones the search matches."""
-        r = self._report
-        if r is None:
-            return
-        refs = {x.ref for x in self._summary.cc if self._matches(x)}
-        before = set(r.excluded)
-        if included:
-            r.excluded -= refs
-        else:
-            r.excluded |= refs
-        if r.excluded == before:
-            return
-        if self._list is not None:
-            self._rebuild()  # the list shows what's left out as it's built
-        for card in self._all_cards:
-            if card.ref.ref in refs:
-                card.set_included(included)
+    def _card_toggled(self, _ref: TrayRef, _included: bool) -> None:
+        """The browser changed the report's set of what's left out (it's the same set)."""
         self._exclusion_updated()
 
     def _exclusion_updated(self) -> None:
         r = self._report
+        if r is None:
+            return
         n_out = len(r.excluded & {x.ref for x in self._summary.cc})
         self.excluded_label.setText(f"{n_out} left out" if n_out else "")
         self._plan = None  # the shown plan no longer matches; nothing may export it
         self.hero.show_working()
         self.exclusion_changed.emit(set(r.excluded))
 
+    def _update_sticky(self, *_args) -> None:
+        """The export bar over the top of the page, while the export size and its Export
+        button are scrolled out of sight."""
+        hero = getattr(self, "hero", None)
+        page = self.scroll.widget()
+        if self._report is None or hero is None or page is None or not page.isAncestorOf(hero):
+            self.sticky.hide()
+            return
+        bottom = hero.mapTo(page, QPoint(0, hero.height())).y()
+        out_of_sight = bottom < self.scroll.verticalScrollBar().value()
+        self.sticky.copy(hero)
+        viewport = self.scroll.viewport().geometry()
+        self.sticky.setGeometry(viewport.left(), viewport.top(), viewport.width(),
+                                self.sticky.sizeHint().height())
+        self.sticky.setVisible(out_of_sight and self.stack.currentWidget() is self.scroll)
+        self.sticky.raise_()
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._update_sticky()
+
     def sizeHint(self) -> QSize:  # noqa: N802
         return QSize(800, 600)
+
+
+def _compact_notice(*args, **kwargs) -> Notice:
+    """The page's notices are one line each until opened: the CC isn't pushed off screen by
+    explanations that are read once."""
+    return Notice(*args, compact=True, **kwargs)
 
 
 def _set_text_if_alive(button, text: str) -> None:

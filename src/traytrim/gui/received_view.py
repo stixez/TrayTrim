@@ -4,6 +4,7 @@ already have, and the CC in it, before anything is installed."""
 from __future__ import annotations
 
 import os
+from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
@@ -11,9 +12,9 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QHBoxLayout
 
 from traytrim.gui import system
-from traytrim.gui.describe import THUMB_TYPES, display_name, group_refs, item_label, plural
-from traytrim.gui.report_parts import (MAX_CARDS, CcCard, NoticeStack, PagedCcList, ReportPage,
-                                       Section, Verdict)
+from traytrim.gui.cc_view import STATIC, CcBrowser, CcState
+from traytrim.gui.describe import display_name, item_label, plural
+from traytrim.gui.report_parts import MAX_CARDS, NoticeStack, ReportPage, Verdict
 from traytrim.gui.theme import SPACE
 from traytrim.gui.widgets import Notice, label, link_button
 from traytrim.names import ItemName
@@ -64,9 +65,11 @@ class ReceivedView(ReportPage):
         self.received: Received | None = None
         self.user_dir: Path | None = None
         self._names: dict[TrayRef, ItemName] = {}
-        self._thumbs: dict[int, QImage] = {}
+        self._thumbs: OrderedDict[int, QImage] = OrderedDict()
         self._thumbs_done = False
-        self._cards: list[CcCard] = []
+        self.browser: CcBrowser | None = None
+        self._state: CcState | None = None
+        self._view, self._sort, self._filters = "cards", "category", ("", "all", "all")
         self._working_for: Path | None = None
 
     # States
@@ -94,30 +97,26 @@ class ReceivedView(ReportPage):
     def show_received(self, r: Received) -> None:
         self.received = r
         self._working_for = None
-        self._names, self._thumbs, self._thumbs_done = {}, {}, False
+        self._names, self._thumbs, self._thumbs_done = {}, OrderedDict(), False
+        self._filters = ("", "all", "all")  # a new zip: no search (view and sort stay)
         self._build()
 
     def set_names(self, r: Received, names: dict[TrayRef, ItemName]) -> None:
         if r is not self.received or not names:
             return
         self._names.update(names)
-        if len(r.cc) > MAX_CARDS:
-            self._build()  # the list shows names in a column of its own
-            return
-        for card in self._cards:
-            card.set_name(self._names.get(card.ref.ref))
+        if self.browser is not None:
+            self.browser.refresh()
 
     def set_thumbnails(self, r: Received, images: dict[int, QImage], finished: bool) -> None:
         if r is not self.received:
             return
         self._thumbs.update(images)
         self._thumbs_done = self._thumbs_done or finished
-        for card in self._cards:
-            image = self._thumbs.get(card.ref.ref.instance)
-            if image is not None:
-                card.thumb.set_image(image)
-            elif self._thumbs_done:
-                card.thumb.set_missing()
+        if self._state is not None:
+            self._state.all_tried = self._thumbs_done
+        if self.browser is not None:
+            self.browser.repaint_items()
 
     def refresh_theme(self) -> None:
         if self.received is not None:
@@ -152,7 +151,7 @@ class ReceivedView(ReportPage):
         col.addWidget(notices)
         self._fill_notices(notices)
 
-        self._cards = []
+        self.browser = self._state = None
         if r.cc:
             col.addSpacing(SPACE["xl"])
             bar = QHBoxLayout()
@@ -165,25 +164,22 @@ class ReceivedView(ReportPage):
             col.addWidget(label("What the zip brings, as it is in its package.", "secondary",
                                 wrap=True))
             col.addSpacing(SPACE["l"])
-            groups = group_refs(r.cc, lambda x: display_name(x, self._names.get(x.ref)))
-            if len(r.cc) > MAX_CARDS:  # a list, a page at a time
-                paged = PagedCcList(any(i.kind == "household" for i in r.items), set(),
-                                    self._names)
-                paged.set_groups(groups)
-                col.addWidget(paged)
-                groups = []
-            for title, refs in groups:
-                cards = [CcCard(x, True, self._names.get(x.ref), mode=CcCard.STATIC)
-                         for x in refs]
-                for card in cards:  # a rebuild (theme change) keeps what's loaded
-                    image = self._thumbs.get(card.ref.ref.instance)
-                    if image is not None:
-                        card.thumb.set_image(image)
-                    elif self._thumbs_done or card.ref.ref.kind not in THUMB_TYPES:
-                        card.thumb.set_missing()
-                self._cards += cards
-                col.addWidget(Section(title, cards))
+            state = CcState(STATIC, any(i.kind == "household" for i in r.items), self._thumbs)
+            state.names = self._names
+            # Pictures are read from the zip all at once, and not at all for a big one.
+            state.all_tried = self._thumbs_done or len(r.cc) > MAX_CARDS
+            browser = CcBrowser(r.cc, state, view=self._view, sort=self._sort,
+                                usage=bool(r.items), placeholder="Search names",
+                                filters=self._filters)
+            browser.view_changed.connect(self._remember_view)
+            self.browser, self._state = browser, state
+            col.addWidget(browser)
         col.addStretch(1)
+
+    def _remember_view(self) -> None:
+        if self.browser is not None:
+            self._view, self._sort = self.browser.view, self.browser.sort
+            self._filters = self.browser.filters()
 
     def _fill_notices(self, notices: NoticeStack) -> None:
         r = self.received

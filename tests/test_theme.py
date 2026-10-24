@@ -32,6 +32,7 @@ TEXT_PAIRS = [  # (foreground, background), need 4.5:1
     ("danger_text", "danger_bg"), ("danger_text", "window"), ("text", "danger_bg"),
     ("text_secondary", "selection"), ("text", "surface_hover"), ("text_secondary", "surface_hover"),
     ("window", "text"),  # tooltips are inverted
+    ("coffee_text", "coffee_bg"), ("coffee_text", "coffee_hover"),
 ]
 
 UI_PAIRS = [  # (foreground, background), need 3:1

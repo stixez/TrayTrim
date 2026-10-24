@@ -2,30 +2,27 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from pathlib import Path, PurePosixPath
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QImage
-from PySide6.QtWidgets import QHBoxLayout, QLineEdit, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from traytrim import restypes
-from traytrim.gui import icons, system, theme
-from traytrim.gui.describe import THUMB_TYPES, display_name, item_label, plural
+from traytrim.gui import system
+from traytrim.gui.cc_view import EXPORT, MAX_THUMBNAILS, CcBrowser, CcState
+from traytrim.gui.describe import plural
 from traytrim.gui.flow import FlowLayout
-from traytrim.gui.report_parts import (MAX_CARDS, CcCard, NoticeStack, PagedCcList, ReportPage,
-                                       Section, Verdict, item_menu)
+from traytrim.gui.report_parts import NoticeStack, ReportPage, Verdict, item_menu
 from traytrim.gui.theme import SPACE
 from traytrim.gui.widgets import Notice, ShowMore, label, link_button
 from traytrim.names import ItemName
 from traytrim.pkgreport import Dependent, PackageReport
 from traytrim.resolve import LocatedRef
-from traytrim.tray import RefKind, TrayItem, TrayRef
+from traytrim.tray import TrayItem, TrayRef
 from traytrim.units import human_size
 
-# Section titles for the items in a package, in this order.
-KIND_TITLES = {RefKind.CAS_PART: "CAS parts", RefKind.OBJECT: "Objects",
-               RefKind.BUILD: "Build items", RefKind.SIM_MODIFIER: "Sliders",
-               RefKind.SCULPT: "Sculpts", RefKind.SKIN_TONE: "Skin tones"}
 PAGE_USERS = 60  # "Used by" links shown at a time
 CAVEAT = "Only your Tray is checked: Sims, lots and rooms that are only in a save game aren't."
 
@@ -65,17 +62,18 @@ class PackageView(ReportPage):
     export_item_requested = Signal(object, object)  # LocatedRef, ItemName or None
     package_requested = Signal(object)              # Path of another package
     tray_item_requested = Signal(object)            # TrayItem
+    thumbnails_wanted = Signal(object, list)        # package Path, refs of cards on screen
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.report: PackageReport | None = None
         self._names: dict[TrayRef, ItemName] = {}
-        self._thumbs: dict[int, QImage] = {}
-        self._thumbs_done = False
-        self._cards: list[CcCard] = []
-        self._sections: list[Section] = []
-        self._list: PagedCcList | None = None
-        self._query = ""
+        self._thumbs: OrderedDict[int, QImage] = OrderedDict()
+        self._tried: set[int] = set()
+        self.browser: CcBrowser | None = None
+        self._state: CcState | None = None
+        self._view, self._sort = "cards", "category"  # kept from package to package
+        self._filters = ("", "all", "all")  # kept while it's the same package
         self._users: list[TrayItem] | None = None       # None until worked out
         self._dependents: list[Dependent] | None = None
         self._unreadable: list[Path] = []
@@ -114,7 +112,8 @@ class PackageView(ReportPage):
         same = self.report is not None and self.report.path == report.path
         self.report = report
         if not same:
-            self._names, self._thumbs, self._thumbs_done, self._query = {}, {}, False, ""
+            self._names, self._thumbs, self._tried = {}, OrderedDict(), set()
+            self._filters = ("", "all", "all")
         self._users = self._dependents = None
         self._unreadable, self._failed, self._tray_read = [], "", True
         self._tray_unreadable = []
@@ -155,26 +154,18 @@ class PackageView(ReportPage):
         if self.report is None or self.report.path != path or not names:
             return
         self._names.update(names)
-        if self._list is not None:  # refill it in place: a rebuild would take the search's focus
-            self._apply_filter()
-            return
-        for card in self._cards:
-            card.set_name(self._names.get(card.ref.ref))
-        for section in self._sections:
-            section.reorder(lambda c: display_name(c.ref, self._names.get(c.ref.ref)).casefold())
-        self._apply_filter()
+        if self.browser is not None:
+            self.browser.refresh()
 
-    def set_thumbnails(self, path: Path, images: dict[int, QImage], finished: bool) -> None:
+    def set_thumbnails(self, path: Path, images: dict[int, QImage], tried: set[int]) -> None:
+        """Thumbnails loaded for the instances `tried`; those without one get the
+        placeholder."""
         if self.report is None or self.report.path != path:
             return
-        self._thumbs.update(images)
-        self._thumbs_done = self._thumbs_done or finished
-        for card in self._cards:
-            image = self._thumbs.get(card.ref.ref.instance)
-            if image is not None:
-                card.thumb.set_image(image)
-            elif self._thumbs_done:
-                card.thumb.set_missing()
+        state = self._state or CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS)
+        state.add_thumbnails(images, tried)
+        if self.browser is not None:
+            self.browser.repaint_items()
 
     def refresh_theme(self) -> None:
         if self.report is not None:
@@ -233,73 +224,34 @@ class PackageView(ReportPage):
         bar.addStretch(1)
         col.addLayout(bar)
         col.addSpacing(SPACE["xs"])
-        self._search = None
-        self._cards, self._sections, self._list = [], [], None
+        self.browser = None
         if not r.items:
             col.addWidget(label("No CAS parts, objects or build items: only files other CC or "
                                 "the game uses, like meshes, textures or tuning.", "secondary",
                                 wrap=True))
         else:
-            many = len(r.items) > MAX_CARDS
-            hint = ("Right-click an item to export it on its own, with everything it needs."
-                    if many else "Click an item to export it on its own, with everything it "
-                    "needs.")
-            col.addWidget(label(hint, "secondary", wrap=True))
+            col.addWidget(label("Click an item to export it on its own, with everything it "
+                                "needs.", "secondary", wrap=True))
             col.addSpacing(SPACE["l"])
-            tools = QHBoxLayout()
-            tools.setSpacing(SPACE["m"])
-            search = QLineEdit(self._query)
-            search.setPlaceholderText("Search names")
-            search.setAccessibleName("Search the items in this package")
-            search.setClearButtonEnabled(True)
-            search.setFixedWidth(280)
-            search.addAction(icons.icon("search", theme.current().text_tertiary, 16),
-                             QLineEdit.ActionPosition.LeadingPosition)
-            search.textChanged.connect(self._query_changed)
-            self._search = search
-            tools.addWidget(search)
-            self.match_label = label("", "secondary")
-            tools.addWidget(self.match_label)
-            tools.addStretch(1)
-            col.addLayout(tools)
-            col.addSpacing(SPACE["l"])
-            self.no_match = label("", "secondary", wrap=True)
-            self.no_match.hide()
-            col.addWidget(self.no_match)
-            groups = self._groups()
-            if many:
-                # "Used in" is hidden: nothing here is in a household.
-                self._list = PagedCcList(False, set(), self._names, self._export_ref,
-                                         hide_used_in=True)
-                col.addWidget(self._list)
-            else:
-                for title, refs in groups:
-                    cards = [CcCard(x, True, self._names.get(x.ref), mode=CcCard.EXPORT)
-                             for x in refs]
-                    for card in cards:
-                        card.activated.connect(self._export_card)
-                        card.menu_requested.connect(self._card_menu)
-                        if card.ref.ref.instance in self._thumbs:
-                            card.thumb.set_image(self._thumbs[card.ref.ref.instance])
-                        elif self._thumbs_done or card.ref.ref.kind not in THUMB_TYPES:
-                            card.thumb.set_missing()
-                        self._cards.append(card)
-                    section = Section(title, cards)
-                    self._sections.append(section)
-                    col.addWidget(section)
+            path = r.path
+            # Pictures are read as cards are shown; a big package keeps the latest ones.
+            state = CcState(EXPORT, False, self._thumbs, self._tried, MAX_THUMBNAILS)
+            state.names = self._names
+            state.on_wanted = lambda refs: self.thumbnails_wanted.emit(path, refs)
+            browser = CcBrowser(r.items, state, view=self._view, sort=self._sort, usage=False,
+                                placeholder="Search names and creators", filters=self._filters)
+            browser.item_activated.connect(self._export_ref)
+            browser.menu_requested.connect(self._card_menu)
+            browser.view_changed.connect(self._remember_view)
+            self.browser, self._state = browser, state
+            col.addWidget(browser)
         col.addStretch(1)
-        self._apply_filter()
         self.scroll.verticalScrollBar().setValue(position)
 
-    def _groups(self) -> list[tuple[str, list[LocatedRef]]]:
-        by_kind: dict[RefKind, list[LocatedRef]] = {}
-        for ref in self.report.items:
-            by_kind.setdefault(ref.ref.kind, []).append(ref)
-        return [(KIND_TITLES[k], sorted(by_kind[k], key=self._sort_key))
-                for k in KIND_TITLES if k in by_kind]
-
-    def _sort_key(self, ref: LocatedRef) -> str:
-        return display_name(ref, self._names.get(ref.ref)).casefold()
+    def _remember_view(self) -> None:
+        if self.browser is not None:
+            self._view, self._sort = self.browser.view, self.browser.sort
+            self._filters = self.browser.filters()
 
     def _fill_usage(self) -> None:
         r = self.report
@@ -407,50 +359,8 @@ class PackageView(ReportPage):
         self._users_shown = min(start + PAGE_USERS, len(self._users))
         self._users_more.set_shown(self._users_shown)
 
-    # Search
-
-    def _query_changed(self, text: str) -> None:
-        self._query = text
-        self._apply_filter()
-
-    def _matches(self, ref: LocatedRef) -> bool:
-        if not self._query.strip():
-            return True
-        name = self._names.get(ref.ref)
-        haystack = " ".join([display_name(ref, name), name.creator if name else "",
-                             name.raw if name else "", item_label(ref)]).casefold()
-        return all(word in haystack for word in self._query.casefold().split())
-
-    def _apply_filter(self) -> None:
-        if self._search is None:
-            return
-        total = len(self.report.items)
-        if self._list is not None:  # the matches, a page at a time
-            self._list.set_groups([(t, [r for r in refs if self._matches(r)])
-                                   for t, refs in self._groups()])
-            shown = self._list.total
-        else:
-            shown = 0
-            for section in self._sections:
-                matching = 0
-                for card in section.cards:
-                    ok = self._matches(card.ref)
-                    card.setVisible(ok)
-                    matching += ok
-                section.show_matching(matching)
-                shown += matching
-        query = self._query.strip()
-        self.match_label.setText(f"{shown} of {total}" if query else "")
-        self.no_match.setText(f"Nothing matches “{self._query}”.")
-        self.no_match.setVisible(bool(query) and shown == 0)
-
-    # Export one item
-
-    def _export_card(self, card: CcCard) -> None:
-        self.export_item_requested.emit(card.ref, card.name)
-
-    def _card_menu(self, card: CcCard, pos) -> None:
-        item_menu(self, pos, lambda: self._export_card(card))
+    def _card_menu(self, ref: LocatedRef, pos) -> None:
+        item_menu(self, pos, lambda: self._export_ref(ref))
 
     def _export_ref(self, ref: LocatedRef) -> None:
         self.export_item_requested.emit(ref, self._names.get(ref.ref))

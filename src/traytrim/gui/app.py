@@ -87,7 +87,7 @@ def run(theme_override: str | None = None) -> int:
     set_theme(app, theme_override if theme_override in THEMES else settings.theme)
     tasks.run_in_background(remove_stale_temp, lambda _n: None, lambda _e: None)
     smoke_test = bool(os.environ.get("TRAYTRIM_SMOKE_TEST"))
-    window = MainWindow(settings, check_updates=not smoke_test
+    window = MainWindow(settings, check_updates=not smoke_test and settings.check_updates
                         and not os.environ.get("TRAYTRIM_NO_UPDATE_CHECK"))
     window.show()
     if smoke_test:

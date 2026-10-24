@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from traytrim import restypes
@@ -16,6 +17,33 @@ GROUP_ORDER = ["Hair", "Clothing", "Accessories", "Makeup", "Eyes", "Skin detail
 # Kinds with a thumbnail in their package, and its resource type.
 THUMB_TYPES = {RefKind.CAS_PART: restypes.THUM, RefKind.OBJECT: restypes.OBJECT_THUMB,
                RefKind.BUILD: restypes.OBJECT_THUMB}
+
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def saved_text(item: TrayItem, now: float | None = None) -> str:
+    """"Saved 3 Oct", or "Saved 3 Oct 2025" in another year: tells apart tray items with the
+    same name (the game saves a new one each time). English months whatever the locale."""
+    if not item.modified:
+        return ""
+    t = time.localtime(item.modified)
+    year = time.localtime(now if now is not None else time.time()).tm_year
+    when = f"{t.tm_mday} {_MONTHS[t.tm_mon - 1]}" + ("" if t.tm_year == year else f" {t.tm_year}")
+    return f"Saved {when}, {t.tm_hour:02}:{t.tm_min:02}"  # the same name is often saved twice a day
+
+
+def duplicate_names(items: list[TrayItem]) -> set[tuple[int, str]]:
+    """(type, name) of the tray items whose name another item of the same kind has too."""
+    seen: dict[tuple[int, str], int] = {}
+    for item in items:
+        key = (item.type, item.name.strip().casefold())
+        seen[key] = seen.get(key, 0) + 1
+    return {key for key, n in seen.items() if n > 1}
+
+
+def is_duplicate(item: TrayItem, duplicates: set[tuple[int, str]]) -> bool:
+    return (item.type, item.name.strip().casefold()) in duplicates
 
 
 def item_label(ref: LocatedRef) -> str:

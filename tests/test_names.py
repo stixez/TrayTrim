@@ -109,3 +109,10 @@ def test_a_chosen_copy_is_used(world):  # noqa: F811
     chosen = plan.resources[k["shape"]]
     assert chosen.copy.rel == "slider.package" and chosen.chosen
     assert plan.export_size == default.export_size - 1  # "shape v1" vs "shape v2!"
+
+
+def test_a_name_of_numbers_only_gives_way_to_the_package_name():
+    from traytrim.names import readable_cas_name
+
+    assert readable_cas_name("-1889534009:976845349").title == ""
+    assert readable_cas_name("yfHead").title == "yfHead"

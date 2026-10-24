@@ -212,7 +212,7 @@ def cmd_tray_show(args: argparse.Namespace) -> int:
         conflict = f"  [{len(r.mods)} copies, using the last]" if len(r.mods) > 1 else ""
         approx = "  [approximate]" if r.approximate else ""
         name = names.get(r.ref)
-        title = f"{name.title}  " if name is not None else ""
+        title = f"{name.title or name.raw}  " if name is not None else ""
         print(f"  {label:<14} {title}({r.used.rel}){conflict}{approx}")
         if args.verbose:
             for sim, uses in r.usage_by_name():

@@ -8,7 +8,7 @@ from pathlib import Path
 from PySide6.QtCore import QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (QAbstractButton, QDialog, QFileDialog, QFrame, QGridLayout,
-                               QHBoxLayout, QProgressBar, QPushButton, QScrollArea,
+                               QHBoxLayout, QLineEdit, QProgressBar, QPushButton, QScrollArea,
                                QStackedWidget, QVBoxLayout, QWidget)
 
 from traytrim import tray
@@ -20,8 +20,9 @@ from traytrim.gui.gallery import subtitle
 from traytrim.gui.describe import plural
 from traytrim.gui.tasks import BackgroundTask, describe_error
 from traytrim.gui.theme import RADIUS, SPACE
-from traytrim.gui.widgets import (ElidedLabel, Notice, SimChip, Spinner, SupportLine, label,
-                                  link_button)
+from traytrim.gui.describe import duplicate_names, is_duplicate
+from traytrim.gui.widgets import (ElidedLabel, MenuButton, Notice, SimChip, Spinner,
+                                  SupportLine, label, link_button)
 from traytrim.index import ResourceIndex
 from traytrim.settings import Settings
 from traytrim.tray import TrayItem
@@ -43,9 +44,10 @@ class PickRow(QAbstractButton):
 
     HEIGHT = 48
 
-    def __init__(self, item: TrayItem, parent=None):
+    def __init__(self, item: TrayItem, with_date: bool = False, parent=None):
         super().__init__(parent)
         self.item = item
+        self._with_date = with_date  # several items have its name: say when it was saved
         self.setCheckable(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -143,7 +145,7 @@ class PickRow(QAbstractButton):
                          Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft, name)
         painter.setFont(theme.ui_font("caption"))
         painter.setPen(QColor(p.text_secondary))
-        second = painter.fontMetrics().elidedText(subtitle(self.item),
+        second = painter.fontMetrics().elidedText(subtitle(self.item, self._with_date),
                                                   Qt.TextElideMode.ElideRight, width)
         painter.drawText(QRectF(left, mid + 1, width, 18),
                          Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft, second)
@@ -167,7 +169,7 @@ class BatchDialog(QDialog):
         self._rows: list[PickRow] = []
         self._running: list[PickRow] = []
         self.setWindowTitle("Export several")
-        self.setMinimumSize(600, 640)
+        self.setMinimumSize(640, 760)  # room for the list under the search
         outer = QVBoxLayout(self)
         outer.setContentsMargins(SPACE["xl"], SPACE["xl"], SPACE["xl"], SPACE["l"])
         outer.setSpacing(SPACE["s"])
@@ -181,11 +183,31 @@ class BatchDialog(QDialog):
         outer.addWidget(self.intro)
         outer.addSpacing(SPACE["s"])
 
+        # Search and kind, for a Tray of hundreds.
+        filters = QHBoxLayout()
+        filters.setSpacing(SPACE["s"])
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Search names and Sims")
+        self.search.setAccessibleName("Search the items to export")
+        self.search.setClearButtonEnabled(True)
+        self.search.addAction(icons.icon("search", theme.current().text_tertiary, 16),
+                              QLineEdit.ActionPosition.LeadingPosition)
+        self.search.textChanged.connect(self._filter)
+        filters.addWidget(self.search, 1)
+        kinds = [("all", "All kinds")] + [(str(t), h) for t, h in _KIND_HEADINGS
+                                         if any(i.type == t for i in items)]
+        self.kind_button = MenuButton("Show", kinds, "all")
+        self.kind_button.chosen.connect(lambda _k: self._filter())
+        filters.addWidget(self.kind_button)
+        outer.addLayout(filters)
+
         head = QHBoxLayout()
         self.count_label = label("", "secondary")
         head.addWidget(self.count_label)
         head.addStretch(1)
         self.all_button = link_button("Select all")
+        self.all_button.setToolTip("Select every item shown (while you search or filter, only "
+                                   "those)")
         self.all_button.clicked.connect(lambda: self._set_all(True))
         self.none_button = link_button("Clear")
         self.none_button.clicked.connect(lambda: self._set_all(False))
@@ -199,22 +221,26 @@ class BatchDialog(QDialog):
         self.list_col = QVBoxLayout(holder)
         self.list_col.setContentsMargins(0, 0, SPACE["s"], 0)
         self.list_col.setSpacing(0)
-        self._headings: list[QWidget] = []
+        self._headings: list[tuple[QWidget, int]] = []
+        duplicates = duplicate_names(items)
         for item_type, heading in _KIND_HEADINGS:
             of_kind = [i for i in items if i.type == item_type]
             if not of_kind:
                 continue
             title = label(heading, "noticeTitle")
             title.setContentsMargins(0, SPACE["m"] if self._rows else 0, 0, SPACE["xs"])
-            self._headings.append(title)
+            self._headings.append((title, item_type))
             self.list_col.addWidget(title)
             for item in of_kind:
-                row = PickRow(item)
+                row = PickRow(item, is_duplicate(item, duplicates))
                 row.setChecked(item.instance == preselect)
                 row.toggled.connect(self._update_count)
                 self._rows.append(row)
                 self.list_col.addWidget(row)
         self.list_col.addStretch(1)
+        self.no_match = label("", "secondary", wrap=True)
+        self.no_match.hide()
+        self.list_col.insertWidget(0, self.no_match)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
@@ -255,6 +281,7 @@ class BatchDialog(QDialog):
             "CC they share is in it once.")
         self.together_chip.toggled.connect(self._update_count)
         self.kit_chip = SimChip("In-game test kit")
+        self.kit_chip.setChecked(self.settings.export_test_kit)  # the default, from Settings
         self.kit_chip.setAccessibleName("Also make an in-game test kit")
         self.kit_chip.setToolTip("A folder next to each zip with only its packages and steps to "
                                  "try it in your game with nothing else installed.")
@@ -353,8 +380,29 @@ class BatchDialog(QDialog):
         self.export_button.setText("Export together" if together
                                    else f"Export {n}" if n else "Export")
 
+    def _filter(self, *_args) -> None:
+        """Show the rows the search and kind pick (what's selected stays selected)."""
+        words = self.search.text().casefold().split()
+        kind = self.kind_button.current
+        shown_types = set()
+        for row in self._rows:
+            item = row.item
+            haystack = " ".join([item.name, *(s.name for s in item.sims)]).casefold()
+            ok = (kind == "all" or str(item.type) == kind) and all(w in haystack for w in words)
+            row.setVisible(ok)
+            if ok:
+                shown_types.add(item.type)
+        for heading, item_type in self._headings:
+            heading.setVisible(item_type in shown_types)
+        self.no_match.setText(f"Nothing matches \u201c{self.search.text().strip()}\u201d."
+                              if words else "Nothing of this kind.")
+        self.no_match.setVisible(not shown_types)
+        self._update_count()
+
     def _set_all(self, checked: bool) -> None:
         for row in self._rows:
+            if checked and row.isHidden():
+                continue  # Select all picks what's shown; Clear clears everything
             row.blockSignals(True)
             row.setChecked(checked)
             row.blockSignals(False)
@@ -382,8 +430,11 @@ class BatchDialog(QDialog):
         for row in self._rows:
             row.setVisible(row in self._running)
             row.set_running()
-        for heading in self._headings:
+        for heading, _type in self._headings:
             heading.hide()
+        self.search.setEnabled(False)
+        self.kind_button.setEnabled(False)
+        self.no_match.hide()
         for row in self._running:
             row.set_status("Waiting")
         self.all_button.hide()

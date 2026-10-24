@@ -97,8 +97,8 @@ def test_the_window_end_to_end(app, world, monkeypatch, tmp_path):  # noqa: F811
 
         # Exporting one item from a package opens the export dialog for just that item.
         win.mods_list.select_path(user / "Mods" / "Soft_Bob_Recolors.package")
-        pump(lambda: win.packages.report is not None and win.packages._cards)
-        win.packages._cards[0]._activate()
+        pump(lambda: win.packages.report is not None and win.packages.browser is not None)
+        win.packages.browser._activated(win.packages.browser.shown()[0])
         pump(lambda: dialogs)
         request = dialogs[0].request
         assert request.item is None and len(request.refs) == 1 and request.plan.resources

@@ -43,7 +43,8 @@ the result. The zip holds the packages, the tray files and a README that says ho
 - **Takes the copy the game uses** when the same file is in your Mods more than once with
   different content, tells you which one and why, and lets you pick another.
 - **Shows what everything is**: CC by its own name ("Driftwood Rattan Chair", "Soft Bob"), with
-  its thumbnail, searchable and sortable by category, size or name. Lots, rooms and households
+  its thumbnail, searchable, filterable (by category, what's left out, items with several copies) and
+  sortable by category, name, size or package, as cards or a list. Lots, rooms and households
   show their own tray picture.
 - **Lets you leave things out** with a click, or all of them at once (Include all, Leave all out,
   for what the search matches), and export only some Sims of a household. The size updates as
@@ -58,7 +59,10 @@ the result. The zip holds the packages, the tray files and a README that says ho
 - **Prepares an in-game test**: a folder with only the export and steps to try it in your game
   with nothing else installed, then put your Mods back.
 - **Exports several at once**, one verified zip each, or together in one zip that shares its
-  packages, like a lot with the household that lives there. A history keeps every export.
+  packages, like a lot with the household that lives there; search and filter what to pick. A
+  history keeps every export.
+- **Settings** (the gear, or Ctrl+,): light or dark theme, the folders, where exports go and
+  whether they make a test kit, update checks, and what TrayTrim keeps in its cache.
 - **Exports one item on its own**: right-click any CC item for a small package with just that
   item and everything it needs, even when it lives in a 1 GB merge.
 - **Shows what breaks if you delete a package** (the Mods tab): which other CC needs its meshes
@@ -70,8 +74,12 @@ the result. The zip holds the packages, the tray files and a README that says ho
 
 <table>
   <tr>
+    <td><img src="docs/screenshots/start-light.png" alt="The start page: what's in the Tray and Mods, and where to start"></td>
     <td><img src="docs/screenshots/family-notices.png" alt="A family with notices about missing CC, conflicting copies and a gameplay mod"></td>
+  </tr>
+  <tr>
     <td><img src="docs/screenshots/leave-out.png" alt="Leaving an item out of the export"></td>
+    <td><img src="docs/screenshots/list-view.png" alt="CC as a list, with ticks to leave items out"></td>
   </tr>
   <tr>
     <td><img src="docs/screenshots/export-light.png" alt="The export dialog"></td>
@@ -82,8 +90,7 @@ the result. The zip holds the packages, the tray files and a README that says ho
     <td><img src="docs/screenshots/lot-search.png" alt="Searching a lot's CC, largest first"></td>
   </tr>
   <tr>
-    <td><img src="docs/screenshots/household-dark.png" alt="Dark theme"></td>
-    <td><img src="docs/screenshots/list-view.png" alt="CC as a list"></td>
+    <td colspan="2"><img src="docs/screenshots/household-dark.png" alt="Dark theme"></td>
   </tr>
 </table>
 
@@ -117,7 +124,12 @@ and config folders.
 The optional in-game test kit is the one thing that touches Mods, and only when you run it
 yourself: its steps (or the two `.bat` helpers on Windows) rename your Mods folder for the test and
 put it back afterwards. The helpers refuse to run while the game is open and only restore Mods if
-the test folder holds nothing but the two test files.
+the test folder holds nothing but the files the test put there.
+
+**Updates:** at start, TrayTrim asks GitHub (`api.github.com`) whether a newer release is out, and
+if one is, offers its download; nothing is downloaded or installed unless you choose to. The
+request carries nothing about you or your files. Turn it off in Settings (or set the environment
+variable `TRAYTRIM_NO_UPDATE_CHECK=1`).
 
 ## How it works
 
@@ -142,8 +154,8 @@ across texture formats, the way the game resolves them.
 
 **What needs what** (the Mods tab) is a second cache next to the index: every reference between
 Mods resources, found the way an export follows them. The first build reads every CAS part, mesh
-and object in Mods, so it takes a while on a big folder; after that only changed packages are
-read. Only the copies the game loads count, and references are followed through any number of
+and object in Mods, so it takes a few minutes on a big folder (about four for 4,500 packages and
+43 GB); after that only changed packages are read, in about a second. Only the copies the game loads count, and references are followed through any number of
 packages, both for "what breaks" and for "used by".
 
 **One assumption the game doesn't document:** when two Mods packages hold the same resource, the

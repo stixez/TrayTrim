@@ -10,7 +10,9 @@ from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QListView, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem)
 
+from traytrim import restypes, settings
 from traytrim.gui import icons, theme
+from traytrim.gui.gallery import change_filter
 from traytrim.gui.describe import plural
 from traytrim.gui.theme import RADIUS, SPACE, TYPE
 from traytrim.index import ModsPackageInfo
@@ -63,41 +65,88 @@ class ModsModel(QAbstractListModel):
         return None
 
 
+# (menu text, button text) of the choices settings keep: (key, menu text, button text).
+_SORT_TEXT = {"name": ("A to Z (the order the game loads them)", "A to Z"),
+              "name_desc": ("Z to A", "Z to A"), "size": ("Largest first", "Largest"),
+              "size_asc": ("Smallest first", "Smallest"), "newest": ("Newest first", "Newest"),
+              "items": ("Most items first", "Most items")}
+_SHOW_TEXT = {"all": ("All packages", "All"), "cas": ("With CAS parts", "CAS"),
+              "objects": ("With objects", "Objects"), "build": ("With build items", "Build"),
+              "sliders": ("With sliders, sculpts or skin tones", "Sliders"),
+              "none": ("Without CC items (tuning, scripts, meshes)", "No CC items")}
+MODS_SORTS = [(k, *_SORT_TEXT[k]) for k in settings.MODS_SORTS]
+MODS_SHOWS = [(k, *_SHOW_TEXT[k]) for k in settings.MODS_SHOWS]
+_SHOW_TYPES = {"cas": {restypes.CASP}, "objects": {restypes.OBJECT_DEFINITION},
+               "build": set(restypes.BUILD_NAMES),
+               "sliders": {restypes.SIM_MODIFIER, restypes.SCULPT, restypes.SKIN_TONE}}
+
+
+_KIND_ICONS = (("cas", "cat-top"), ("objects", "cat-object"), ("build", "cat-build"),
+               ("sliders", "cat-slider"))
+
+
+def kind_icon(p: ModsPackageInfo) -> str:
+    """The icon of the kind of item a package holds most of; a box when it holds none (meshes,
+    textures, tuning or a merge of those)."""
+    counts = {kind: sum(p.kinds.get(t, 0) for t in _SHOW_TYPES[kind]) for kind, _i in _KIND_ICONS}
+    best = max(counts, key=counts.get) if counts else None
+    return dict(_KIND_ICONS)[best] if best is not None and counts[best] else "package"
+
+
+def shows(p: ModsPackageInfo, show: str) -> bool:
+    """Whether a package is listed for a "Show" choice (MODS_SHOWS)."""
+    if show == "none":
+        return not p.items
+    types = _SHOW_TYPES.get(show)
+    return types is None or any(p.kinds.get(t) for t in types)
+
+
 class ModsFilter(QSortFilterProxyModel):
-    """Packages whose path inside Mods holds every word typed, case-insensitively, in load
-    order (alphabetical, as in the Mods folder) or largest first."""
+    """Packages whose path inside Mods holds every word typed, case-insensitively, and that
+    hold the kind of items chosen, in load order (alphabetical, as in the Mods folder) or
+    another order (MODS_SORTS)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._needle = ""
-        self.by_size = False
+        self.sort_by = "name"
+        self.show = "all"
         self.sort(0)
 
-    def set_by_size(self, by_size: bool) -> None:
-        self.by_size = by_size
+    def set_sort(self, sort_by: str) -> None:
+        self.sort_by = sort_by
         self.invalidate()
         self.sort(0)
+
+    def set_show(self, show: str) -> None:
+        change_filter(self, lambda: setattr(self, "show", show))
 
     def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:  # noqa: N802
         packages = self.sourceModel().packages
         a, b = packages[left.row()], packages[right.row()]
-        if self.by_size and a.size != b.size:
+        key = self.sort_by
+        if key == "size" and a.size != b.size:
             return a.size > b.size
+        if key == "size_asc" and a.size != b.size:
+            return a.size < b.size
+        if key == "newest" and a.mtime_ns != b.mtime_ns:
+            return a.mtime_ns > b.mtime_ns
+        if key == "items" and a.items != b.items:
+            return a.items > b.items
+        if key == "name_desc":
+            return a.load_order > b.load_order
         return a.load_order < b.load_order
 
     def set_text(self, text: str) -> None:
-        if hasattr(self, "beginFilterChange"):  # Qt 6.10+
-            self.beginFilterChange()
-            self._needle = text.strip().casefold()
-            self.endFilterChange()
-        else:
-            self._needle = text.strip().casefold()
-            self.invalidateFilter()
+        change_filter(self, lambda: setattr(self, "_needle", text.strip().casefold()))
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
+        package = self.sourceModel().packages[row]
+        if not shows(package, self.show):
+            return False
         if not self._needle:
             return True
-        rel = self.sourceModel().packages[row].rel.casefold()
+        rel = package.rel.casefold()
         return all(word in rel for word in self._needle.split())
 
 
@@ -135,7 +184,7 @@ class ModsDelegate(QStyledItemDelegate):
         glyph = 18
         painter.drawImage(QRectF(tile.center().x() - glyph / 2, tile.center().y() - glyph / 2,
                                  glyph, glyph),
-                          icons.image("package", p.text_secondary, glyph,
+                          icons.image(kind_icon(package), p.text_secondary, glyph,
                                       painter.device().devicePixelRatioF()))
 
         left = int(tile.right()) + SPACE["m"]
@@ -171,6 +220,7 @@ class ModsList(QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setUniformItemSizes(True)
         self.setFrameShape(QListView.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # rows elide
         self.setAccessibleName("Mods packages")
         self._filtering = False
         self._chosen: str | None = None  # path of the chosen package
@@ -200,10 +250,18 @@ class ModsList(QListView):
         finally:
             self._filtering = False
 
-    def set_by_size(self, by_size: bool) -> None:
+    def set_show(self, show: str) -> None:
         self._filtering = True
         try:
-            self.proxy.set_by_size(by_size)
+            self.proxy.set_show(show)
+            self._reselect()
+        finally:
+            self._filtering = False
+
+    def set_sort(self, sort_by: str) -> None:
+        self._filtering = True
+        try:
+            self.proxy.set_sort(sort_by)
             self._reselect()
         finally:
             self._filtering = False

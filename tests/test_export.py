@@ -60,6 +60,8 @@ def test_packages_are_named_like_the_creator_named_the_item():
     assert package_stem(None, "hair_0100") == "hair_0100_TT"
     assert package_stem(ItemName("???", "", "???"), "") == "Item_TT"
     assert package_stem(ItemName("Aux", "", "Aux"), "") == "Aux_TT"  # not the AUX device
+    numbers = readable_cas_name("-1889534009:976845349")  # shown by its package's name
+    assert package_stem(numbers, "Lacy_Shoes_0000000000000ABC") == "Lacy_Shoes_0000000000000ABC_TT"
     assert len(package_stem(ItemName("x" * 300, "", "x" * 300), "")) <= 64 + len("_TT")
 
 

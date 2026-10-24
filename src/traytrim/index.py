@@ -92,6 +92,7 @@ class ModsPackageInfo:
     mtime_ns: int
     resources: int
     items: int = 0  # resources of the types asked for (see mods_packages)
+    kinds: dict[int, int] = field(default_factory=dict, hash=False, compare=False)  # type -> n
 
 
 @dataclass
@@ -432,16 +433,19 @@ class ResourceIndex:
         """Every readable Mods package, in load order. With item_types, also how many resources
         of those types each holds (one pass over the Mods resources)."""
         counts: dict[int, int] = {}
+        kinds: dict[int, dict[int, int]] = {}
         if item_types:
             marks = ",".join("?" * len(item_types))
-            counts = dict(self.db.execute(
-                f"SELECT pkg, COUNT(*) FROM mods_res WHERE type IN ({marks}) GROUP BY pkg",
-                tuple(item_types)))
+            for pkg, type_id, n in self.db.execute(
+                    f"SELECT pkg, type, COUNT(*) FROM mods_res WHERE type IN ({marks}) "
+                    "GROUP BY pkg, type", tuple(item_types)):
+                counts[pkg] = counts.get(pkg, 0) + n
+                kinds.setdefault(pkg, {})[type_id] = n
         rows = self.db.execute(
             "SELECT id, path, rel, load_order, size, mtime_ns, resources FROM packages "
             "WHERE source=? AND error IS NULL ORDER BY load_order", (MODS,))
         return [ModsPackageInfo(Path(path), rel, order, size, mtime, resources,
-                                counts.get(pkg, 0))
+                                counts.get(pkg, 0), kinds.get(pkg, {}))
                 for pkg, path, rel, order, size, mtime, resources in rows]
 
     def mods_instances(self, types: set[int]):

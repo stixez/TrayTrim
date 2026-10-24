@@ -9,9 +9,9 @@ from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QListView, QStyle, QStyledItemDelegate,
                                QStyleOptionViewItem)
 
-from traytrim import tray
+from traytrim import settings, tray
 from traytrim.gui import icons, theme
-from traytrim.gui.describe import item_subtitle
+from traytrim.gui.describe import duplicate_names, is_duplicate, item_subtitle, saved_text
 from traytrim.gui.theme import RADIUS, SPACE, TYPE
 from traytrim.tray import TrayItem
 
@@ -24,13 +24,19 @@ class TrayModel(QAbstractListModel):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.items: list[TrayItem] = []
+        self.duplicates: set[tuple[int, str]] = set()  # names more than one item has
         self.portraits: dict[int, QImage] = {}  # Sim id -> face
         self.pictures: dict[int, QImage] = {}   # tray item -> its own picture
 
     def set_items(self, items: list[TrayItem]) -> None:
         self.beginResetModel()
         self.items = items
+        self.duplicates = duplicate_names(items)
         self.endResetModel()
+
+    def subtitle(self, item: TrayItem) -> str:
+        """The second line, with when it was saved for a name more than one item has."""
+        return subtitle(item, is_duplicate(item, self.duplicates))
 
     def set_portraits(self, portraits: dict[int, QImage]) -> None:
         self.portraits.update(portraits)
@@ -59,9 +65,10 @@ class TrayModel(QAbstractListModel):
         if role == Qt.ItemDataRole.DisplayRole:
             return item.name or f"Unnamed {item.kind}"
         if role == Qt.ItemDataRole.AccessibleTextRole:
-            return f"{item.name}: {subtitle(item)}"
+            return f"{item.name}: {self.subtitle(item)}"
         if role == Qt.ItemDataRole.ToolTipRole:
-            return subtitle(item) or None
+            saved = saved_text(item)
+            return "\n".join(t for t in (subtitle(item), saved) if t) or None
         if role == ItemRole:
             return item
         return None
@@ -72,35 +79,76 @@ def sims_text(item: TrayItem) -> str:
     return ", ".join(names) if names else "No Sims"
 
 
-def subtitle(item: TrayItem) -> str:
-    """The second line of a row: the Sims of a household, the size of a lot or room."""
-    if item.type == tray.ITEM_HOUSEHOLD:
-        return sims_text(item)
-    return item_subtitle(item)
+def subtitle(item: TrayItem, with_date: bool = False) -> str:
+    """The second line of a row: the Sims of a household, the size of a lot or room; first
+    when it was saved, with_date (several items have its name)."""
+    text = sims_text(item) if item.type == tray.ITEM_HOUSEHOLD else item_subtitle(item)
+    saved = saved_text(item) if with_date else ""
+    return " \u00b7 ".join(t for t in (saved, text) if t)
+
+
+# (key, menu text) for each kind of tray item; the first is the default.
+_SORT_TEXT = {"newest": "Newest first", "oldest": "Oldest first", "name": "A to Z",
+              "name_desc": "Z to A", "sims": "Most Sims first", "largest": "Largest first"}
+HOUSEHOLD_SORTS = [(k, _SORT_TEXT[k]) for k in settings.TRAY_SORTS if k != "largest"]
+LOT_SORTS = [(k, _SORT_TEXT[k]) for k in settings.TRAY_SORTS if k != "sims"]
+
+
+def sorts_for(item_type: int) -> list[tuple[str, str]]:
+    return HOUSEHOLD_SORTS if item_type == tray.ITEM_HOUSEHOLD else LOT_SORTS
+
+
+def _area(item: TrayItem) -> int:
+    return item.size[0] * item.size[1] if item.size and all(item.size) else 0
+
+
+def change_filter(proxy: QSortFilterProxyModel, apply) -> None:
+    """Change what a proxy's filterAcceptsRow decides (`apply`), the way this Qt wants."""
+    if hasattr(proxy, "beginFilterChange"):  # Qt 6.10+
+        proxy.beginFilterChange()
+        apply()
+        proxy.endFilterChange()
+    else:
+        apply()
+        proxy.invalidateFilter()
 
 
 class TrayFilter(QSortFilterProxyModel):
-    """One kind of tray item, matching the name or any Sim's name, case-insensitively."""
+    """One kind of tray item, matching the name or any Sim's name, case-insensitively, in
+    the chosen order."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._needle = ""
         self._type = tray.ITEM_HOUSEHOLD
+        self.sort_by = "newest"  # the game's last save on top, as the Tray folder lists them
+        self.sort(0)
 
-    def _change(self, apply) -> None:
-        if hasattr(self, "beginFilterChange"):  # Qt 6.10+
-            self.beginFilterChange()
-            apply()
-            self.endFilterChange()
-        else:
-            apply()
-            self.invalidateFilter()
+    def set_sort(self, sort_by: str) -> None:
+        self.sort_by = sort_by
+        self.invalidate()
+        self.sort(0)
+
+    def lessThan(self, left: QModelIndex, right: QModelIndex) -> bool:  # noqa: N802
+        items = self.sourceModel().items
+        a, b = items[left.row()], items[right.row()]
+        key = self.sort_by
+        if key == "newest" and a.modified != b.modified:
+            return a.modified > b.modified
+        if key == "oldest" and a.modified != b.modified:
+            return a.modified < b.modified
+        if key == "sims" and len(a.sims) != len(b.sims):
+            return len(a.sims) > len(b.sims)
+        if key == "largest" and _area(a) != _area(b):
+            return _area(a) > _area(b)
+        names = (a.name.casefold(), a.instance), (b.name.casefold(), b.instance)
+        return names[1] < names[0] if key == "name_desc" else names[0] < names[1]
 
     def set_text(self, text: str) -> None:
-        self._change(lambda: setattr(self, "_needle", text.strip().casefold()))
+        change_filter(self, lambda: setattr(self, "_needle", text.strip().casefold()))
 
     def set_type(self, item_type: int) -> None:
-        self._change(lambda: setattr(self, "_type", item_type))
+        change_filter(self, lambda: setattr(self, "_type", item_type))
 
     def filterAcceptsRow(self, row: int, parent: QModelIndex) -> bool:  # noqa: N802
         item: TrayItem = self.sourceModel().items[row]
@@ -183,8 +231,8 @@ class TrayDelegate(QStyledItemDelegate):
         painter.setFont(theme.ui_font("caption"))
         painter.setPen(QColor(p.text_secondary))
         sims_rect = QRect(text_left, name_rect.bottom() + 4, text_width, TYPE["caption"] + 6)
-        second = painter.fontMetrics().elidedText(subtitle(item), Qt.TextElideMode.ElideRight,
-                                                  text_width)
+        second = painter.fontMetrics().elidedText(model.subtitle(item),
+                                                  Qt.TextElideMode.ElideRight, text_width)
         painter.drawText(sims_rect, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                          second)
         painter.restore()
@@ -205,6 +253,7 @@ class TrayList(QListView):
         self.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setUniformItemSizes(True)
         self.setFrameShape(QListView.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)  # rows elide
         self.setAccessibleName("Tray items")
         self._filtering = False
         self._chosen: TrayItem | None = None
@@ -264,6 +313,19 @@ class TrayList(QListView):
                 self.scrollTo(index, QAbstractItemView.ScrollHint.PositionAtCenter)
                 return True
         return False
+
+    def set_sort(self, sort_by: str) -> None:
+        """Order the rows; the chosen item stays chosen, and in view."""
+        self.set_filter(self.proxy._needle, None)  # keeps the choice through the re-sort
+        self._filtering = True
+        try:
+            self.proxy.set_sort(sort_by)
+        finally:
+            self._filtering = False
+        if self.currentIndex().isValid():
+            self.scrollTo(self.currentIndex(), QAbstractItemView.ScrollHint.PositionAtCenter)
+        else:
+            self.scrollToTop()
 
     def visible_count(self) -> int:
         return self.proxy.rowCount()

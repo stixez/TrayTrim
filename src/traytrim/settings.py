@@ -11,7 +11,10 @@ from traytrim.paths import config_dir
 
 THEMES = ("system", "light", "dark")
 TRAY_KINDS = ("household", "lot", "room", "mods")
-MODS_SORTS = ("name", "size")
+# The choices settings keep; gallery.py and mods_list.py name them (one list, here).
+TRAY_SORTS = ("newest", "oldest", "name", "name_desc", "sims", "largest")
+MODS_SORTS = ("name", "name_desc", "size", "size_asc", "newest", "items")
+MODS_SHOWS = ("all", "cas", "objects", "build", "sliders", "none")
 
 
 @dataclass
@@ -22,8 +25,12 @@ class Settings:
     theme: str = "system"           # "system", "light" or "dark"
     window_geometry: str | None = None
     tray_kind: str = "household"    # which kind of tray item the gallery shows, or "mods"
-    mods_sort: str = "name"         # the Mods list: "name" (load order) or "size" (largest first)
+    tray_sort: str = "newest"       # the households, lots or rooms list (see TRAY_SORTS)
+    mods_sort: str = "name"         # the Mods list: "name" is load order (see MODS_SORTS)
+    mods_show: str = "all"          # which Mods packages are listed (see MODS_SHOWS)
     skipped_version: str | None = None  # an update the user chose not to be asked about again
+    export_test_kit: bool = True    # exports make an in-game test kit unless turned off here
+    check_updates: bool = True      # ask GitHub for a newer release when the app starts
 
     @classmethod
     def load(cls, path: Path | None = None) -> Settings:
@@ -39,8 +46,12 @@ class Settings:
         # stop the app from starting.
         for f in fields(cls):
             value = data.get(f.name)
-            allowed = {"theme": THEMES, "tray_kind": TRAY_KINDS,
-                       "mods_sort": MODS_SORTS}.get(f.name)
+            if f.type == "bool":  # a switch: true or false, nothing else
+                if isinstance(value, bool):
+                    setattr(settings, f.name, value)
+                continue
+            allowed = {"theme": THEMES, "tray_kind": TRAY_KINDS, "tray_sort": TRAY_SORTS,
+                       "mods_sort": MODS_SORTS, "mods_show": MODS_SHOWS}.get(f.name)
             if isinstance(value, str) and (allowed is None or value in allowed):
                 setattr(settings, f.name, value)
         return settings

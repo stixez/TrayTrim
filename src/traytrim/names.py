@@ -96,7 +96,10 @@ def readable_cas_name(raw: str) -> ItemName:
     parts = [p for p in raw.split("_") if p and not _STAMP.match(p)]
     at = next((i for i, p in enumerate(parts) if _AGE_GENDER.match(p)), None)
     if at is None or at == len(parts) - 1:
-        return ItemName(" ".join(parts) or raw, "", raw)
+        text = " ".join(parts) or raw
+        # Only numbers ("-1889534009:976845349", left by some tools) say nothing: no title, so
+        # the package's name is shown instead.
+        return ItemName(text if any(c.isalpha() for c in text) else "", "", raw)
     creators = list(dict.fromkeys(parts[:at]))  # "A_A_A_yfAcc" -> "A"
     words = [_CAMEL.sub(" ", p) for p in parts[at + 1:]]
     return ItemName(" ".join(words), " ".join(creators).strip(" ."), raw)

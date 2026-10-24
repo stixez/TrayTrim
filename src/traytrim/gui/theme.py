@@ -51,6 +51,9 @@ class Palette:
     danger_bg: str
     selection: str       # selected row background
     focus: str
+    coffee_bg: str       # the one warm touch: the Buy me a coffee button
+    coffee_hover: str
+    coffee_text: str
 
 
 # "Ink": a monochrome palette. The accent is ink itself (near-black in light, near-white in
@@ -79,6 +82,9 @@ LIGHT = Palette(
     danger_bg="#FCE9E7",
     selection="#EBEBEB",
     focus="#171717",
+    coffee_bg="#FFF1B8",
+    coffee_hover="#FFE88F",
+    coffee_text="#5C4300",
 )
 
 DARK = Palette(
@@ -104,6 +110,9 @@ DARK = Palette(
     danger_bg="#3D2220",
     selection="#303030",
     focus="#EDEDED",
+    coffee_bg="#3A3117",
+    coffee_hover="#4A3F1D",
+    coffee_text="#F5D77A",
 )
 
 
@@ -229,6 +238,11 @@ def stylesheet(p: Palette) -> str:
         text-decoration: underline;
     }}
     QPushButton[kind="link"]:focus {{ border: none; padding: 0; outline: 2px solid {p.focus}; }}
+    QPushButton[kind="icon"] {{
+        background: transparent; border: none; padding: {s['xs']}px; border-radius: {r['control']}px;
+    }}
+    QPushButton[kind="icon"]:hover {{ background: {p.surface_hover}; }}
+    QPushButton[kind="icon"]:focus {{ border: 2px solid {p.focus}; padding: {s['xs'] - 2}px; }}
     QPushButton[kind="titleTab"] {{
         background: transparent; border: none; padding: 0; color: {p.text_tertiary};
         font-size: {TYPE['title']}px; font-weight: 600;
@@ -248,6 +262,9 @@ def stylesheet(p: Palette) -> str:
     QFrame#ccCard[excluded="true"] {{ background: {p.sidebar}; border-style: dashed; }}
     QFrame#ccCard:focus {{ border: 2px solid {p.focus}; }}
     QFrame#ccCard QLabel {{ border: none; background: transparent; }}
+
+    #stickyBar {{ background: {p.window}; border-bottom: 1px solid {p.divider}; }}
+    #statTile {{ background: {p.sidebar}; border-radius: {r['card']}px; }}
 
     QFrame#dangerPanel {{ background: {p.danger_bg}; border-radius: {r['card']}px; }}
     QLabel[role="dangerTitle"] {{ color: {p.danger_text}; font-weight: 600; }}
