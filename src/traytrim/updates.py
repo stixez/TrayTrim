@@ -11,6 +11,7 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 from traytrim import __version__
 
@@ -41,14 +42,25 @@ def is_newer(latest: str, current: str | None = None) -> bool:
     return a is not None and b is not None and a > b
 
 
+def _portable() -> bool:
+    """A Windows build run from the portable zip: the installer leaves its uninstaller next to
+    TrayTrim.exe."""
+    if not getattr(sys, "frozen", False):
+        return False
+    return not any(Path(sys.executable).parent.glob("unins*.exe"))
+
+
 def _asset_for_platform(assets: list[dict], platform: str = sys.platform,
-                        machine: str | None = None) -> str | None:
-    """The download a user of this platform wants: the installer on Windows, the app on macOS,
-    the archive on Linux (see packaging/ for the names). None when no build runs on this
-    machine (an Intel Mac, an ARM Linux): they get the release page."""
+                        machine: str | None = None, portable: bool = False) -> str | None:
+    """The download a user of this platform wants: the installer on Windows (the portable zip
+    for a portable copy), the app on macOS, the archive on Linux (see packaging/ for the
+    names). None when no build runs on this machine (an Intel Mac, an ARM Linux): they get the
+    release page."""
     machine = (machine or host.machine()).lower()
     if platform == "win32":  # x64, which Windows on ARM also runs
         suffixes: tuple[str, ...] = ("-setup.exe", "-windows-portable.zip")
+        if portable:
+            suffixes = suffixes[::-1]
     elif platform == "darwin":
         suffixes = ("-macos-arm64.zip",) if machine in ("arm64", "aarch64") else ()
     else:
@@ -62,7 +74,7 @@ def _asset_for_platform(assets: list[dict], platform: str = sys.platform,
 
 
 def parse_release(data: object, platform: str = sys.platform,
-                  machine: str | None = None) -> Release | None:
+                  machine: str | None = None, portable: bool | None = None) -> Release | None:
     """The release GitHub's API describes, or None if it isn't one we can offer."""
     if not isinstance(data, dict) or data.get("draft") or data.get("prerelease"):
         return None
@@ -74,7 +86,8 @@ def parse_release(data: object, platform: str = sys.platform,
         page = RELEASES_PAGE
     notes = data.get("body") if isinstance(data.get("body"), str) else ""
     assets = data.get("assets") if isinstance(data.get("assets"), list) else []
-    download = _asset_for_platform([a for a in assets if isinstance(a, dict)], platform, machine)
+    download = _asset_for_platform([a for a in assets if isinstance(a, dict)], platform, machine,
+                                   _portable() if portable is None else portable)
     if download is None or not download.startswith(f"https://github.com/{REPO}/"):
         download = page
     return Release(tag.lstrip("v"), page, notes.strip(), download)

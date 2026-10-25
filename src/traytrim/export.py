@@ -104,6 +104,19 @@ def safe_name(text: str, fallback: str = "Household", limit: int = 60) -> str:
     return cleaned[:limit].strip("_") or fallback
 
 
+# The folder an export is put together in, next to where the zip goes (so the zip is moved,
+# not copied, into place). Left behind if the app is killed; swept at the next start.
+STAGE_PREFIX = ".traytrim-"
+
+
+def _hide(path: Path) -> None:
+    """Hide a folder in Explorer too (a leading dot hides it on macOS and Linux only)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        ctypes.windll.kernel32.SetFileAttributesW(str(path), 0x2)  # FILE_ATTRIBUTE_HIDDEN
+
+
 # Short enough that the game's folder, a subfolder or two in Mods and the name stay within
 # Windows' 260-character paths.
 STEM_LIMIT = 64
@@ -285,7 +298,8 @@ def export_parts(parts: list[Part], refs: list[LocatedRef], plan: Plan,
         raise ExportError(reason)
     out_dir.mkdir(parents=True, exist_ok=True)
     base = options.base_name
-    stage = Path(tempfile.mkdtemp(prefix=".traytrim-", dir=out_dir))
+    stage = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=out_dir))
+    _hide(stage)
     try:
         content = stage / "zip"
         mods_dir = content / "Mods"
@@ -385,7 +399,7 @@ def _copy_resource(sources, writer: PackageWriter, res: PlannedResource) -> None
         raise ExportError(
             f"{res.copy.rel} changed since TrayTrim indexed it. Let the index refresh (it does "
             "at start, or choose Try again in the status bar), then export again.")
-    writer.add_raw(res.key, sources.read_raw(res.copy), entry.compression, entry.mem_size)
+    writer.add_raw(res.key, sources.read_raw(res.copy), current.compression, current.mem_size)
 
 
 def _zip_comment(parts: list[Part], item_name: str, packs: list[str],

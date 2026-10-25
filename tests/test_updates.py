@@ -23,6 +23,8 @@ def test_versions_compare_as_numbers():
 
 def test_each_platform_gets_its_own_download():
     assert parse_release(RELEASE, "win32", "AMD64").download.endswith("-setup.exe")
+    assert parse_release(RELEASE, "win32", "AMD64", portable=True).download.endswith(
+        "-windows-portable.zip")  # a portable copy isn't offered the installer
     assert parse_release(RELEASE, "darwin", "arm64").download.endswith("-macos-arm64.zip")
     assert parse_release(RELEASE, "linux", "x86_64").download.endswith("-linux-x86_64.tar.gz")
     # No build for these machines: they get the release page instead of one that won't run.

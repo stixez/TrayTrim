@@ -74,6 +74,7 @@ def build_app() -> Path:
         "--add-data", f"{ROOT / 'LICENSE'}{sep}.",
         "--add-data", f"{ROOT / 'THIRD_PARTY_NOTICES.md'}{sep}.",
         "--add-data", f"{ROOT / 'LICENSES'}{sep}LICENSES",
+        "--add-data", f"{python_license(work / 'Python')}{sep}LICENSES",
     ]
     if sys.platform == "win32":
         args += ["--icon", str(PACKAGING / "assets" / "TrayTrim.ico"),
@@ -85,7 +86,35 @@ def build_app() -> Path:
     for module in EXCLUDE:
         args += ["--exclude-module", module]
     PyInstaller.__main__.run(args)
+    if sys.platform == "darwin":
+        set_bundle_version(ROOT / "dist" / "TrayTrim.app" / "Contents" / "Info.plist")
     return ROOT / "dist" / "TrayTrim"
+
+
+def python_license(folder: Path) -> Path:
+    """The license of the Python runtime the app bundles, as LICENSES/Python.txt. It also lists
+    the libraries Python includes (OpenSSL, zlib, SQLite, libffi, expat, bzip2, xz)."""
+    base = Path(sys.base_prefix)
+    candidates = [base / "LICENSE.txt",
+                  base / "lib" / f"python{sys.version_info[0]}.{sys.version_info[1]}" / "LICENSE.txt"]
+    source = next((c for c in candidates if c.is_file()), None)
+    if source is None:
+        raise SystemExit(f"Python's LICENSE.txt not found under {base}")
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / "Python.txt"
+    shutil.copyfile(source, target)
+    return target
+
+
+def set_bundle_version(plist: Path) -> None:
+    """PyInstaller leaves the app at version 0.0.0; Finder's Get Info shows this one."""
+    import plistlib
+
+    with plist.open("rb") as f:
+        info = plistlib.load(f)
+    info["CFBundleShortVersionString"] = info["CFBundleVersion"] = __version__
+    with plist.open("wb") as f:
+        plistlib.dump(info, f)
 
 
 def find_iscc() -> Path | None:

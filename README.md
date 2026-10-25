@@ -179,7 +179,8 @@ Conflict notices say so.
 
 ## Command line
 
-Everything the app does is also available from a terminal:
+The main things the app does are also available from a terminal (the Mods tab, batch
+export, choosing which Sims or items go in, and history are in the app only):
 
 ```
 traytrim                    # open the app

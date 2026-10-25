@@ -12,8 +12,10 @@ check_zip re-checks an export later from the zip alone (see there).
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import shutil
 import tempfile
 import threading
 import zipfile
@@ -350,6 +352,10 @@ def check_zip(zip_path: Path, progress: CheckProgress | None = None,
             except MemberDamaged as e:
                 damaged.append(f"{name}: {e}")
         total = sum(z.getinfo(n).file_size for n in packages)
+        free = shutil.disk_usage(tmp).free
+        if total > free - (256 << 20):  # by the sizes the zip states; reading stops there
+            raise OSError(errno.ENOSPC, f"Checking it needs {total >> 20:,} MB free on the drive "
+                          f"with the temporary folder, and {max(free, 0) >> 20:,} MB is free")
         copied: list[Path] = []
         before = 0
         for i, name in enumerate(packages):

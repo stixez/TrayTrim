@@ -154,8 +154,8 @@ def test_the_window_end_to_end(app, world, monkeypatch, tmp_path):  # noqa: F811
         win.mods_list.select_path(user / "Mods" / "Meshes" / "Soft_Bob_Mesh.package")
         pump(lambda: win.packages.report is not None
              and win.packages.report.rel == "Meshes/Soft_Bob_Mesh.package")
-        (user / "Mods" / "Meshes" / "Soft_Bob_Mesh.package").unlink()
-        pump(lambda: not win.index.running)  # the previous step's check is done
+        pump(lambda: not win.index.running)  # the previous step's check is done (Windows
+        (user / "Mods" / "Meshes" / "Soft_Bob_Mesh.package").unlink()  # can't delete open files)
         win._last_check = 0
         win._check_for_changes()
         pump(lambda: "is gone" in win.packages.message_title.text())

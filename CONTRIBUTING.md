@@ -14,6 +14,9 @@ pip install -e ".[gui,dev]"
 python -m traytrim
 ```
 
+On Windows, clone to a short path (like `C:\dev\TrayTrim`) or turn on long paths: some of
+PySide6's files have long names, and a deep folder makes the install fail with WinError 206.
+
 Before you open a pull request, both of these must pass (CI runs them on Windows, macOS and
 Linux):
 

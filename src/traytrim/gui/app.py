@@ -8,6 +8,7 @@ import sys
 import threading
 import traceback
 from importlib import resources
+from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QIcon, QImage, QPainter, QPixmap
@@ -139,6 +140,18 @@ class CrashReporter(QObject):
         box.exec()
 
 
+def _remove_stale_folders(settings: Settings) -> int:
+    """Temporary folders of checks and exports the app was killed during."""
+    from traytrim.export import STAGE_PREFIX
+    from traytrim.gui.system import desktop
+
+    removed = remove_stale_temp()
+    outputs = {desktop(), *([Path(settings.output_dir)] if settings.output_dir else [])}
+    for folder in outputs:
+        removed += remove_stale_temp(root=folder, prefixes=(STAGE_PREFIX,))
+    return removed
+
+
 def run(theme_override: str | None = None) -> int:
     _windows_taskbar_identity()
     app = create_app()
@@ -147,10 +160,11 @@ def run(theme_override: str | None = None) -> int:
     threading.excepthook = reporter.thread_hook
     settings = Settings.load()
     set_theme(app, theme_override if theme_override in THEMES else settings.theme)
-    tasks.run_in_background(remove_stale_temp, lambda _n: None, lambda _e: None)
+    tasks.run_in_background(lambda: _remove_stale_folders(settings), lambda _n: None,
+                            lambda _e: None)
     smoke_test = bool(os.environ.get("TRAYTRIM_SMOKE_TEST"))
     window = MainWindow(settings, check_updates=not smoke_test and settings.check_updates
-                        and not os.environ.get("TRAYTRIM_NO_UPDATE_CHECK"))
+                        and os.environ.get("TRAYTRIM_NO_UPDATE_CHECK", "0") in ("", "0"))
     window.show()
     if smoke_test:
         # Packaging check: build the window, then quit cleanly (exit code 0).

@@ -465,6 +465,9 @@ def _read_face_blob(sim: SimContents, blob: bytes, prefix: str) -> None:
 
 
 _MIN_ID = 1 << 32  # tuning ids are 64-bit hashes; small numbers are counts, flags, values
+# How deep nested messages are read for ids. In 40 real households every id was within 6
+# levels; each level reads the bytes again, so a deep (or hostile) file costs that many times.
+_MAX_DEPTH = 10
 
 
 def _collect_ids(blob: bytes, out: set[int], depth: int = 0) -> bool:
@@ -478,7 +481,7 @@ def _collect_ids(blob: bytes, out: set[int], depth: int = 0) -> bool:
         if wire in (pb.VARINT, pb.FIXED64):
             if value >= _MIN_ID:
                 out.add(value)
-        elif wire == pb.LEN and depth < 40:
+        elif wire == pb.LEN and depth < _MAX_DEPTH:
             assert isinstance(value, bytes)
             # A LEN field can be a nested message, packed varints (lists of trait ids...) or
             # packed fixed64s; the bytes don't say which, so every reading is collected. Wrong

@@ -164,6 +164,22 @@ def test_a_package_of_one_item_names_it(tmp_path):
     assert package_stem(bag_name, "x") == "Bergdorf_Miu_Miu_Wander_Teddy_Bag_LH_Solid_Magenta_TT"
 
 
+def test_a_swatch_name_every_swatch_has_is_not_shown(tmp_path):
+    # A real case: five colours of a bag all named "..._SolidMagenta", the EA ring's swatch.
+    mods = tmp_path / "Mods"
+    mods.mkdir()
+    keys = [ResourceKey(restypes.CASP, 0, i) for i in (1, 2, 3)]
+    with PackageWriter(mods / "Bag.package") as w:
+        w.add(keys[0], casp("B_yfAcc_Ring_SolidMagenta_202303282110357326"))
+        w.add(keys[1], casp("B_yfAcc_Ring_SolidMagenta_202303282111015557"))
+        w.add(keys[2], casp("B_yfAcc_Ring_Gold_202303282111015557"))
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        ix.update(mods, tmp_path / "Game")
+        refs = [located(ix, RefKind.CAS_PART, k) for k in keys]
+    names = item_names(refs)
+    assert [names[r.ref].full for r in refs] == ["Bag", "Bag", "Bag · Gold"]
+
+
 def test_merges_and_sets_are_not_one_item(tmp_path):
     mods = tmp_path / "Mods"
     mods.mkdir()

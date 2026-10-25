@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import re
 import struct
+from collections import Counter
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -157,6 +158,12 @@ def item_base(raw: str) -> str:
     return _item_and_swatch(raw)[0]
 
 
+def _swatch_key(raw: str) -> str:
+    """A swatch's name with the age and gender it's for: "yf black"."""
+    frame = next((p[:2] for p in raw.split("_") if _AGE_GENDER.match(p)), "")
+    return f"{frame} {swatch_name(raw)}".casefold()
+
+
 def swatch_name(raw: str) -> str:
     """"Bergdorf_yfAcc_IndexLeftEyeballRing_SolidMagenta_2023..." -> "Solid Magenta"."""
     return " ".join(_CAMEL.sub(" ", p) for p in _item_and_swatch(raw)[1])
@@ -194,7 +201,7 @@ class _Package:
     def __init__(self, path: Path):
         self.pkg = dbpf.Package(path)
         self._strings: dict[int, str] | None = None
-        self._one_item: bool | None = None
+        self._item: tuple[bool, frozenset[str]] | None = None
         self._by_instance: dict[int, list[dbpf.IndexEntry]] = {}
         for e in self.pkg:
             self._by_instance.setdefault(e.key.instance, []).append(e)
@@ -221,21 +228,32 @@ class _Package:
         objects or build items next to it (a set named after the whole set). Worked out once
         per package (cached by file, size and time across households); False if it can't be
         read."""
-        if self._one_item is None:
+        return self._read_item()[0]
+
+    def shared_swatches(self) -> frozenset[str]:
+        """Swatch names (casefolded, with the age and gender) that several swatches of the
+        package's one item have for one frame: the EA item's swatch the creator cloned and
+        didn't rename ("Solid Magenta" on five colours of a bag), so they don't say which
+        swatch it is. "black" for an adult and a child is two swatches named right."""
+        return self._read_item()[1]
+
+    def _read_item(self) -> tuple[bool, frozenset[str]]:
+        if self._item is None:
             try:
                 stat = os.stat(self.pkg.path)
-                self._one_item = _one_item(self.pkg, (str(self.pkg.path), stat.st_size,
-                                                      stat.st_mtime_ns))
+                self._item = _one_item(self.pkg, (str(self.pkg.path), stat.st_size,
+                                                  stat.st_mtime_ns))
             except (dbpf.DbpfError, struct.error, OSError):
-                self._one_item = False
-        return self._one_item
+                self._item = (False, frozenset())
+        return self._item
 
 
-def _one_item(pkg: dbpf.Package, file: tuple) -> bool:
+def _one_item(pkg: dbpf.Package, file: tuple) -> tuple[bool, frozenset[str]]:
     if file in _ONE_ITEM:
         return _ONE_ITEM[file]
     answer = not _MERGE.search(os.path.basename(file[0]))
     bases: set[str] = set()
+    swatches: Counter[str] = Counter()
     for e in pkg if answer else ():
         if e.key.type in _NOT_CAS:
             answer = False
@@ -248,19 +266,21 @@ def _one_item(pkg: dbpf.Package, file: tuple) -> bool:
             continue
         if raw and any(c.isalpha() for c in raw):  # numbers only say nothing
             bases.add(item_base(raw))
+            swatches[_swatch_key(raw)] += 1
             if len(bases) > 1:
                 break
     answer = answer and len(bases) == 1
+    shared = frozenset(s for s, n in swatches.items() if n > 1) if answer else frozenset()
     if len(_ONE_ITEM) > 20_000:  # a whole Mods folder is a few thousand packages
         _ONE_ITEM.clear()
-    _ONE_ITEM[file] = answer
-    return answer
+    _ONE_ITEM[file] = answer, shared
+    return answer, shared
 
 
-# (path, size, modified) -> whether the package holds one item; read once per change of the
-# file. A merge stops at its second item, so only a package of one item is read through (a few
-# hundred swatches at most).
-_ONE_ITEM: dict[tuple, bool] = {}
+# (path, size, modified) -> whether the package holds one item, and its shared swatch names;
+# read once per change of the file. A merge stops at its second item, so only a package of one
+# item is read through (a few hundred swatches at most).
+_ONE_ITEM: dict[tuple, tuple[bool, frozenset[str]]] = {}
 
 
 def item_names(refs: list[LocatedRef], cancel=None) -> dict[TrayRef, ItemName]:
@@ -307,8 +327,10 @@ def _name(r: LocatedRef, kind: RefKind, pkg: _Package) -> ItemName | None:
             return None
         name = readable_cas_name(raw)
         if pkg.one_item():
-            name = replace(name, package=readable_package_name(r.used.path.stem),
-                           swatch=swatch_name(raw))
+            swatch = swatch_name(raw)
+            if _swatch_key(raw) in pkg.shared_swatches():
+                swatch = ""  # the same on other swatches: it doesn't say which this is
+            name = replace(name, package=readable_package_name(r.used.path.stem), swatch=swatch)
         return name
     if kind is RefKind.OBJECT:
         entry = pkg.entry(restypes.OBJECT_CATALOG, r.ref.instance)

@@ -26,7 +26,9 @@ def _varint(buf: bytes, p: int) -> tuple[int, int]:
         p += 1
         result |= (b & 0x7F) << shift
         if b < 0x80:
-            return result, p
+            # A 10th byte can carry bits past 64; protobuf keeps the low 64 (and SQLite can't
+            # store more).
+            return result & 0xFFFF_FFFF_FFFF_FFFF, p
         shift += 7
         if shift > 63:
             raise ProtobufError("varint too long")

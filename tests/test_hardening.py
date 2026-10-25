@@ -39,10 +39,10 @@ def _varint(n: int) -> bytes:
             return bytes(out)
 
 
-def test_tray_key_with_an_instance_past_64_bits_is_skipped():
+def test_tray_key_with_an_instance_past_64_bits_keeps_64():
     raw = b"\x08" + _varint(0x034AEECB) + b"\x18" + _varint((1 << 64) + 5)
-    assert pb.first_int(pb.fields_by_number(raw), 3) == (1 << 64) + 5
-    assert tray._key_message(raw) is None
+    assert pb.first_int(pb.fields_by_number(raw), 3) == 5  # as protobuf reads it
+    assert tray._key_message(raw).instance == 5
 
 
 def test_deeply_nested_json_is_treated_as_damaged(tmp_path):
@@ -171,3 +171,35 @@ def test_a_bug_in_a_worker_thread_is_reported_on_the_ui_thread(monkeypatch):
     for _ in range(5):
         app.processEvents()
     assert shown == [("TrayTrim hit a bug: ValueError: boom", True)]
+
+
+def test_a_varint_past_64_bits_is_cut_to_64(tmp_path):
+    # A 10th byte can carry bits past 64. Kept whole, a skin tone or gameplay id made
+    # SQLite raise OverflowError and the household couldn't be planned.
+    from traytrim import resolve
+    from traytrim.index import ResourceIndex
+
+    big = bytes([0xFF] * 9 + [0x7F])
+    assert pb._varint(big, 0) == ((1 << 64) - 1, 10)
+    sim = (pb.field_fixed64(1, 5) + pb.field_str(5, "A") + bytes([10 << 3]) + big
+           + pb.field_bytes(30, bytes([8]) + big))
+    msg = pb.field_bytes(1, pb.field_str(3, "H") + pb.field_bytes(6, sim))
+    path = tmp_path / "0x00000001!0x0000000000000001.householdbinary"
+    path.write_bytes((1).to_bytes(4, "little") + len(msg).to_bytes(4, "little") + msg)
+    contents = tray.read_household(path)
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        resolve.locate(contents, ix)
+        resolve.gameplay_mods(contents, ix)
+
+
+def test_export_folders_left_behind_are_swept(tmp_path):
+    from traytrim.export import STAGE_PREFIX
+
+    old, new, mine = (tmp_path / f"{STAGE_PREFIX}old", tmp_path / f"{STAGE_PREFIX}new",
+                      tmp_path / "Photos")
+    for folder in (old, new, mine):
+        folder.mkdir()
+    os.utime(old, (0, 0))
+    os.utime(mine, (0, 0))
+    assert received.remove_stale_temp(root=tmp_path, prefixes=(STAGE_PREFIX,)) == 1
+    assert not old.exists() and new.exists() and mine.exists()

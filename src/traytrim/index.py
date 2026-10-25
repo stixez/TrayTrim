@@ -59,6 +59,7 @@ CREATE TABLE game_res (
 
 def _s64(u: int) -> int:
     """SQLite integers are signed; store 64-bit instances as two's complement."""
+    u &= 0xFFFF_FFFF_FFFF_FFFF  # never more than 64 bits, whatever a file held
     return u - (1 << 64) if u >= 1 << 63 else u
 
 

@@ -11,7 +11,10 @@ contains the software and fonts below, each under its own license.
   `LICENSES/GPL-3.0.txt`.
 - TrayTrim doesn't change Qt or PySide6. The builds keep them as separate shared libraries (the
   PySide6 and Qt files in the app folder), so you can replace them with your own build of the
-  same version.
+  same version. Settings > About shows which versions your copy has.
+- Qt includes third-party libraries of its own (among them FreeType, HarfBuzz, libpng, libjpeg,
+  PCRE2 and double-conversion), each under a permissive license; Qt lists them at
+  <https://doc.qt.io/qt-6/licenses-used-in-qt.html>.
 - Source code: <https://code.qt.io/cgit/pyside/pyside-setup.git/> (PySide6 and Shiboken6) and
   <https://code.qt.io/cgit/qt/> (Qt). Released versions are listed at
   <https://download.qt.io/official_releases/QtForPython/>.
@@ -25,7 +28,9 @@ contains the software and fonts below, each under its own license.
 
 ## Python and PyInstaller
 
-- The builds include the Python runtime, under the Python Software Foundation License:
+- The builds include the Python runtime, under the Python Software Foundation License. Its
+  text is in `LICENSES/Python.txt` in the app; it also covers the libraries Python includes
+  (OpenSSL, zlib, SQLite, libffi, expat, bzip2, xz). Online:
   <https://docs.python.org/3/license.html>.
 - They are made with PyInstaller, whose bootloader is GPL-2.0 with an exception that allows it
   in apps under any license: <https://pyinstaller.org/en/stable/license.html>.

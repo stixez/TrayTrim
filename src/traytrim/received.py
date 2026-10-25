@@ -125,10 +125,11 @@ class Received:
 TEMP_PREFIXES = ("traytrim-received-", "traytrim-check-")
 
 
-def remove_stale_temp(older_than: float = 24 * 3600, root: Path | None = None) -> int:
+def remove_stale_temp(older_than: float = 24 * 3600, root: Path | None = None,
+                      prefixes: tuple[str, ...] = TEMP_PREFIXES) -> int:
     """Delete TrayTrim's temporary folders left behind (the app was killed while checking a
-    zip), once they're a day old: a running check's folder is never that old. Returns how
-    many went."""
+    zip or exporting), once they're a day old: a running check's or export's folder is never
+    that old. Returns how many went."""
     root = Path(root or tempfile.gettempdir())
     cutoff = time.time() - older_than
     removed = 0
@@ -138,7 +139,7 @@ def remove_stale_temp(older_than: float = 24 * 3600, root: Path | None = None) -
         return 0
     for entry in entries:
         try:
-            if (entry.name.startswith(TEMP_PREFIXES) and entry.is_dir(follow_symlinks=False)
+            if (entry.name.startswith(prefixes) and entry.is_dir(follow_symlinks=False)
                     and entry.stat(follow_symlinks=False).st_mtime < cutoff):
                 shutil.rmtree(entry.path, ignore_errors=True)
                 removed += 1
