@@ -123,7 +123,9 @@ def package_stem(name: ItemName | None, fallback: str) -> str:
     text = ""
     if name is not None:
         if name.package:  # named as the app shows it: its package, and which swatch
-            text = " ".join(filter(None, (name.package, name.swatch)))
+            swatch = safe_name(name.swatch, "", limit=STEM_LIMIT // 2)
+            room = STEM_LIMIT - len(swatch) - 1  # a long package name is cut, not the swatch
+            text = "_".join(filter(None, (safe_name(name.package, "", limit=room), swatch)))
         elif name.creator and name.raw:
             text = cas_file_stem(name.raw)
         else:

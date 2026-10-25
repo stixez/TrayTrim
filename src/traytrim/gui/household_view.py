@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QFrame, QHBoxLayout, QMenu, QScrollArea, QStacked
 from traytrim import restypes
 from traytrim.gui.cc_view import MAX_THUMBNAILS as CC_MAX_THUMBNAILS
 from traytrim.gui.cc_view import TOGGLE, CcBrowser, CcState
-from traytrim.gui.describe import (display_name, item_label, item_subtitle, plural, usage_summary,
+from traytrim.gui.describe import (full_name, item_label, item_subtitle, plural, usage_summary,
                                    usage_text)
 from traytrim.gui.report_parts import Hero, Picture, StickyBar, item_menu
 from traytrim.gui.overview import Overview
@@ -500,7 +500,7 @@ class HouseholdView(QWidget):
                 actions=[("Copy list", lambda b: self._copy_to_clipboard(lines, b))]), "tray")
         if r.overrides:
             n = len(r.overrides)
-            details = [(item_label(x), display_name(x, self._names.get(x.ref)),
+            details = [(item_label(x), full_name(x, self._names.get(x.ref)),
                         x.used.rel if x.used else "") for x in s.cc if x.ref in r.overrides]
             self._add_notice(_compact_notice(
                 "info", "text_secondary",
@@ -542,7 +542,7 @@ class HouseholdView(QWidget):
             details = []
             for owner, group in by_owner.items():
                 ref = located.get(owner)
-                what = (display_name(ref, self._names.get(owner)) if ref is not None
+                what = (full_name(ref, self._names.get(owner)) if ref is not None
                         else ref_label(owner))
                 used = sorted({Path(c.copy.rel).name for c in group})
                 files = plural(len(group), "file")

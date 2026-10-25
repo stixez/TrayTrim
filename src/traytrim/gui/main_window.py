@@ -42,7 +42,7 @@ from traytrim.settings import Settings
 from traytrim.gui.mods_list import MODS_SHOWS, MODS_SORTS, ModsList, PackageRole
 from traytrim.gui.package_view import PackageView
 from traytrim.gui.received_view import ReceivedView
-from traytrim.gui.describe import display_name
+from traytrim.gui.describe import full_name
 from traytrim.depindex import DependencyIndex
 from traytrim.export import safe_name
 from traytrim.pkgreport import (ITEM_TYPES, TrayUsage, dependents, package_report, scan_usage,
@@ -1272,7 +1272,7 @@ class MainWindow(QMainWindow):
         if not self._index_ready or self._item_planning:
             return  # one at a time: a second click mustn't open a second dialog
         self._item_planning = True
-        title = display_name(ref, name) or "CC item"
+        title = full_name(ref, name) or "CC item"
         self.statusBar().showMessage(f"Working out what {title} needs\u2026")
 
         def work():

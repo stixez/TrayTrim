@@ -13,7 +13,7 @@ from PySide6.QtWidgets import QHBoxLayout
 
 from traytrim.gui import system
 from traytrim.gui.cc_view import STATIC, CcBrowser, CcState
-from traytrim.gui.describe import display_name, item_label, plural
+from traytrim.gui.describe import full_name, item_label, plural
 from traytrim.gui.report_parts import MAX_CARDS, NoticeStack, ReportPage, Verdict
 from traytrim.gui.theme import SPACE
 from traytrim.gui.widgets import Notice, label, link_button
@@ -224,7 +224,7 @@ class ReceivedView(ReportPage):
                 body = (f"{plural(len(same), 'is', 'are')} the same. For {len(differ):,}, your "
                         f"copy is different: put into Mods as it is, the game uses {who}. "
                         "Packages load in alphabetical order, and the last one wins.")
-            details = [(display_name(o.ref, self._names.get(o.ref.ref)),
+            details = [(full_name(o.ref, self._names.get(o.ref.ref)),
                         "the same as yours" if o.same
                         else "differs: the zip's copy is used" if o.theirs_loads
                         else "differs: your copy is used",

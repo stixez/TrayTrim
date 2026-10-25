@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QButtonGroup, QFrame, QHBoxLay
 
 from traytrim.gui import icons, theme
 from traytrim.gui.describe import (GROUP_ORDER, THUMB_TYPES, card_caption, category_icon,
-                                   display_name, group_refs, item_label, package_name, plural,
+                                   display_name, full_name, group_refs, item_label, package_name, plural,
                                    usage_summary, usage_text)
 from traytrim.gui.theme import RADIUS, SPACE
 from traytrim.gui.widgets import MenuButton, label, link_button, wrap_and_elide
@@ -84,6 +84,10 @@ class CcState:
     def title(self, ref: LocatedRef) -> str:
         return display_name(ref, self.names.get(ref.ref))
 
+    def full_title(self, ref: LocatedRef) -> str:
+        """The title with the swatch, where there's no line under it (lists, the table)."""
+        return full_name(ref, self.names.get(ref.ref))
+
     def subtitle(self, ref: LocatedRef, title: str | None = None) -> str:
         """The line under a card's title. For an item named after its package, which swatch
         it is ("Solid Magenta"). Otherwise the package it comes from, as its file is named in
@@ -95,7 +99,7 @@ class CcState:
             return name.swatch
         package = package_name(ref) if self.show_source else ""
         stem, shown = _plain(package), _plain(self.title(ref) if title is None else title)
-        if not stem or stem in shown or shown in stem:
+        if not stem or stem in shown:  # "Dress" from "Magnolia_Corset_Dress" still says it
             return ""
         return package
 
@@ -337,7 +341,7 @@ class _RefsModel(QAbstractListModel):
         if role == RefRole:
             return ref
         if role == Qt.ItemDataRole.DisplayRole:
-            return self.state.title(ref)
+            return self.state.full_title(ref)
         if role == Qt.ItemDataRole.ToolTipRole:
             return self.state.tooltip(ref)
         if role == Qt.ItemDataRole.AccessibleTextRole:
@@ -520,7 +524,7 @@ class _TableModel(QAbstractTableModel):
     def _text(self, ref: LocatedRef, column: str) -> str:
         s = self.state
         if column == "Name":
-            return s.title(ref)
+            return s.full_title(ref)
         if column == "Type":
             return item_label(ref)
         if column == "Package":
@@ -632,7 +636,7 @@ class _NameDelegate(QStyledItemDelegate):
         metrics = QFontMetrics(font)
         painter.drawText(QRectF(x, rect.top(), width, rect.height()),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
-                         metrics.elidedText(s.title(ref), Qt.TextElideMode.ElideRight,
+                         metrics.elidedText(s.full_title(ref), Qt.TextElideMode.ElideRight,
                                             int(width)))
         painter.restore()
 
@@ -982,7 +986,7 @@ class CcBrowser(QWidget):
         """(title, items shown, items in it before filtering) per section, in order."""
         s = self.state
         refs = [r for r in self.refs if self.matches(r)]
-        title = lambda r: s.title(r).casefold()  # noqa: E731
+        title = lambda r: s.full_title(r).casefold()  # noqa: E731
         if self.sort == "category":
             totals: dict[str, int] = {}
             for r in self.refs:

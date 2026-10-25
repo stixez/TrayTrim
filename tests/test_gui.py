@@ -214,6 +214,11 @@ def test_detail_view_search_sort_and_names(app, tmp_path):
     named = b.state.names[refs[0].ref]
     b.state.names[refs[0].ref] = ItemName("Hair", "", "Hair")  # says the same, any case
     assert b.state.subtitle(refs[0]) == ""
+    b.state.names[refs[0].ref] = ItemName("Air", "", "Air")  # inside "hair", not the same
+    assert b.state.subtitle(refs[0]) == "hair"
+    b.state.names[refs[0].ref] = ItemName("Waves", "", "Waves", "Me Waves", "Black")
+    assert b.state.title(refs[0]) == "Me Waves" and b.state.subtitle(refs[0]) == "Black"
+    assert b.state.full_title(refs[0]) == "Me Waves \u00b7 Black"  # lists and the table
     b.state.names[refs[0].ref] = named
     b.search.setText("waves")
     assert b.shown() == [refs[0]] and b.match_label.text() == "1 of 2 shown"

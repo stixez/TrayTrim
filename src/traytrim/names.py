@@ -41,7 +41,10 @@ _AGE_GENDER = re.compile(r"^[bpcytaeu][fmu][A-Z][A-Za-z]*$")
 _CAMEL = re.compile(r"(?<=[a-z])(?=[A-Z])|(?<=[A-Z])(?=[A-Z][a-z])")
 _COPY = re.compile(r"\s*\(\d+\)$")          # "Slingbacks(1)": a second download of the file
 _JOINED = re.compile(r"(?<=[^\W_])-(?=[^\W_])")  # "Metallic-Corset", not "NA - Skyla"
-_MERGE = re.compile(r"merge", re.IGNORECASE)
+# "Hair_Merge", "MERGED", "MyMerge"; not "Submerged" or "Emergency".
+_MERGE = re.compile(r"(?i:(?<![a-z])merge)|(?<=[a-z])Merge")
+# What a package holds next to one CAS item that makes it a set, named after the whole set.
+_NOT_CAS = {restypes.OBJECT_CATALOG, restypes.OBJECT_DEFINITION, *restypes.BUILD_NAMES}
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,12 @@ class ItemName:
     raw: str = ""          # the name as stored, for tooltips
     package: str = ""      # its package's name made readable, when the package is this item
     swatch: str = ""       # which swatch of the item it is ("Solid Magenta"), when that shows
+
+    @property
+    def full(self) -> str:
+        """On one line: the package's name and the swatch for an item named after its
+        package (its swatches would read the same otherwise), else the item's own name."""
+        return " \u00b7 ".join(filter(None, (self.package, self.swatch))) or self.title
 
 
 def string_table(data: bytes) -> dict[int, str]:
@@ -125,20 +134,25 @@ def readable_package_name(stem: str) -> str:
 
 def _item_and_swatch(raw: str) -> tuple[str, list[str]]:
     """Which item a CAS part is a swatch of, and the swatch's words:
-    "LVNDR_yfAcc_ManiRound_beige_2025..." is ("lvndr_yfacc_maniround", ["beige"]). A name of the
-    creator's own, "Me_Long_Waves_black", is all but its last part (two parts are a name)."""
+    "LVNDR_yfAcc_ManiRound_beige_2025..." is ("lvndr_acc_maniround", ["beige"]). The swatch is
+    the last part, so "Me_yfTop_Halter_Neck_red" and "Me_yfTop_Halter_Backless_red" are two
+    items. Age and gender don't count: "Me_yfHair_Bob_black" and "Me_cuHair_Bob_black" are one
+    hair for two frames. A name of the creator's own, "Me_Long_Waves_black", is all but its
+    last part too (two parts are a name)."""
     parts = [p for p in raw.split("_") if p and not _STAMP.match(p)]
     at = next((i for i, p in enumerate(parts) if _AGE_GENDER.match(p)), None)
     if at is None:
         cut = len(parts) - 1 if len(parts) >= 3 else len(parts)
         return "_".join(parts[:cut]).casefold(), parts[cut:]
+    cut = len(parts) - 1 if len(parts) > at + 2 else len(parts)
     creators = dict.fromkeys(p.casefold() for p in parts[:at])  # "A_A_yfAcc" is A's too
-    return "_".join([*creators, *(p.casefold() for p in parts[at:at + 2])]), parts[at + 2:]
+    item = [parts[at][2:], *parts[at + 1:cut]]
+    return "_".join([*creators, *(p.casefold() for p in item)]), parts[cut:]
 
 
 def item_base(raw: str) -> str:
     """Which item a CAS part is a swatch of: "LVNDR_yfAcc_ManiRound_beige_2025..." and
-    "LVNDR_yfAcc_ManiRound_red_2025..." are both "lvndr_yfacc_maniround". The creator's prefix
+    "LVNDR_yfAcc_ManiRound_red_2025..." are both "lvndr_acc_maniround". The creator's prefix
     counts: two creators' parts cloned from one EA item are two items."""
     return _item_and_swatch(raw)[0]
 
@@ -223,7 +237,7 @@ def _one_item(pkg: dbpf.Package, file: tuple) -> bool:
     answer = not _MERGE.search(os.path.basename(file[0]))
     bases: set[str] = set()
     for e in pkg if answer else ():
-        if e.key.type in (restypes.OBJECT_CATALOG, restypes.OBJECT_DEFINITION):
+        if e.key.type in _NOT_CAS:
             answer = False
             break
         if e.key.type != restypes.CASP:
@@ -244,7 +258,8 @@ def _one_item(pkg: dbpf.Package, file: tuple) -> bool:
 
 
 # (path, size, modified) -> whether the package holds one item; read once per change of the
-# file (a merge of thousands of parts takes about a second).
+# file. A merge stops at its second item, so only a package of one item is read through (a few
+# hundred swatches at most).
 _ONE_ITEM: dict[tuple, bool] = {}
 
 

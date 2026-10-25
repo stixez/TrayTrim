@@ -158,6 +158,7 @@ def test_a_package_of_one_item_names_it(tmp_path):
     assert bag_name.title == "Index Left Eyeball Ring Solid Magenta"  # kept for search
     assert display_name(refs[0], bag_name) == "Bergdorf Miu Miu Wander Teddy Bag LH"
     assert bag_name.swatch == "Solid Magenta"
+    assert bag_name.full == "Bergdorf Miu Miu Wander Teddy Bag LH \u00b7 Solid Magenta"
     assert display_name(refs[1], names[refs[1].ref]) == "Ear Studs Pearl Cream"
     from traytrim.export import package_stem  # exported under the name the app shows
     assert package_stem(bag_name, "x") == "Bergdorf_Miu_Miu_Wander_Teddy_Bag_LH_Solid_Magenta_TT"
@@ -176,11 +177,43 @@ def test_merges_and_sets_are_not_one_item(tmp_path):
     with PackageWriter(mods / "bedroom set.package") as w:
         w.add(ResourceKey(restypes.CASP, 0, 4), casp("Me_yfAcc_Blanket_white"))
         w.add(ResourceKey(restypes.OBJECT_CATALOG, 0, 5), catalog(0x11))
+    with PackageWriter(mods / "bathroom set.package") as w:  # build items make a set too
+        w.add(ResourceKey(restypes.CASP, 0, 6), casp("Me_yfAcc_Towel_white"))
+        w.add(ResourceKey(restypes.WALL, 0, 7), catalog(0x12))
+    with PackageWriter(mods / "tops.package") as w:  # one word in common is not one item
+        w.add(ResourceKey(restypes.CASP, 0, 8), casp("Me_yfTop_Halter_Neck_red"))
+        w.add(ResourceKey(restypes.CASP, 0, 9), casp("Me_yfTop_Halter_Backless_red"))
     with ResourceIndex(tmp_path / "index.sqlite") as ix:
         ix.update(mods, tmp_path / "Game")
-        refs = [located(ix, RefKind.CAS_PART, ResourceKey(restypes.CASP, 0, i)) for i in (1, 3, 4)]
+        refs = [located(ix, RefKind.CAS_PART, ResourceKey(restypes.CASP, 0, i))
+                for i in (1, 3, 4, 6, 8)]
     names = item_names(refs)
     assert all(not names[r.ref].package for r in refs)
+
+
+def test_one_item_for_every_age_is_one_item(tmp_path):
+    # Real cases: "[Kijiko]Remove-EA-Lashes" has yfHead and ymHead parts; a file name with
+    # "merge" inside a word is not a merge.
+    mods = tmp_path / "Mods"
+    mods.mkdir()
+    with PackageWriter(mods / "Submerged_Bob.package") as w:
+        for i, frame in enumerate(("yf", "ym", "cu")):
+            w.add(ResourceKey(restypes.CASP, 0, i + 1), casp(f"Me_{frame}Hair_Bob_black"))
+    with ResourceIndex(tmp_path / "index.sqlite") as ix:
+        ix.update(mods, tmp_path / "Game")
+        ref = located(ix, RefKind.CAS_PART, ResourceKey(restypes.CASP, 0, 2))
+    name = item_names([ref])[ref.ref]
+    assert (name.package, name.swatch) == ("Submerged Bob", "black")
+
+
+@pytest.mark.parametrize("file, merge", [
+    ("Hair_Merge", True), ("MERGED hair", True), ("MyMerge", True), ("merged", True),
+    ("Submerged_Tail", False), ("Emergency_Uniform", False), ("SUBMERGED", False),
+])
+def test_merge_names(file, merge):
+    from traytrim.names import _MERGE
+
+    assert bool(_MERGE.search(file)) is merge
 
 
 @pytest.mark.parametrize("raw, swatch", [

@@ -63,6 +63,9 @@ def test_packages_are_named_like_the_creator_named_the_item():
     numbers = readable_cas_name("-1889534009:976845349")  # shown by its package's name
     assert package_stem(numbers, "Lacy_Shoes_0000000000000ABC") == "Lacy_Shoes_0000000000000ABC_TT"
     assert len(package_stem(ItemName("x" * 300, "", "x" * 300), "")) <= 64 + len("_TT")
+    long = "SHOESTOPIA - Salopato High Heels Metallic Platform Ankle Strap Sandals"
+    stem = package_stem(ItemName("", "", "", long, "Solid Magenta"), "")
+    assert stem.endswith("_Solid_Magenta_TT") and len(stem) <= 64 + len("_TT")
 
 
 def test_export_writes_verified_zip_and_test_kit(tmp_path, household):

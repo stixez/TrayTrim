@@ -85,6 +85,11 @@ def display_name(ref: LocatedRef, name: ItemName | None) -> str:
     return name.title if name is not None and name.title else package_name(ref)
 
 
+def full_name(ref: LocatedRef, name: ItemName | None) -> str:
+    """`display_name` with the swatch, for lists and messages: one line where a card has two."""
+    return name.full if name is not None and name.package else display_name(ref, name)
+
+
 def usage_text(ref: LocatedRef) -> str:
     """Every use, one Sim per line (for tooltips)."""
     return "\n".join(f"{sim}: {', '.join(sorted(uses))}" for sim, uses in ref.usage_by_name())
