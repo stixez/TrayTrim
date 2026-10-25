@@ -328,7 +328,7 @@ def test_package_view_shows_what_needs_it(app, tmp_path):
                      pos=grid.visualRect(grid.model().index(0, 0)).center())
     assert [r.ref.instance for r in wanted] == [recolor.instance]
     view.grab()  # painting the card asks for its thumbnail
-    QTest.qWait(60)
+    assert _wait_for(lambda: asked)
     assert [r.ref.instance for r in asked] == [recolor.instance]
     view.deleteLater()
 
@@ -376,9 +376,22 @@ def test_labels_and_tooltips_show_names_as_plain_text(app):
     assert GuiQt.mightBeRichText(name)  # what PlainToolTips escapes before showing
 
 
-def test_long_lists_are_all_there_and_only_cards_on_screen_ask_for_pictures(app):
+def _wait_for(done, ms: int = 5000) -> bool:
+    """Runs the event loop until done() or ms have passed. Thumbnails are asked for on a
+    timer, which a slow CI runner (macOS) can fire well after its interval."""
+    import time
+
     from PySide6.QtTest import QTest
 
+    end = time.monotonic() + ms / 1000
+    while not done():
+        if time.monotonic() > end:
+            return False
+        QTest.qWait(10)
+    return True
+
+
+def test_long_lists_are_all_there_and_only_cards_on_screen_ask_for_pictures(app):
     from traytrim.gui.household_view import HouseholdReport, HouseholdView
     from traytrim.gui.widgets import PAGE_DETAILS, Notice
     from traytrim.resolve import LocatedRef
@@ -407,7 +420,7 @@ def test_long_lists_are_all_there_and_only_cards_on_screen_ask_for_pictures(app)
     b = view.browser
     assert len(b.shown()) == many and len(b.sections) == 1
     view.grab()
-    QTest.qWait(60)
+    assert _wait_for(lambda: wanted)
     assert 0 < len(wanted) < many
     b.search.setText(f"{lot_refs[-1].ref.instance:x}")
     assert b.shown() == [lot_refs[-1]]
@@ -1259,15 +1272,12 @@ def test_thumbnails_asked_for_are_not_asked_again_after_a_rebuild(app):
     asked = []
     view.thumbnails_wanted.connect(lambda _i, wanted: asked.extend(wanted))
     view.grab()
-    app.processEvents()
-    from PySide6.QtTest import QTest
-    QTest.qWait(60)
+    assert _wait_for(lambda: asked)
     first = len(asked)
     assert first == len(refs)
     view._rebuild()  # a theme change before the answers came
     view.grab()
-    QTest.qWait(60)
-    assert len(asked) == first
+    assert not _wait_for(lambda: len(asked) > first, ms=300)
     view.deleteLater()
 
 
