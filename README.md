@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="packaging/assets/TrayTrim-256.png" width="96" height="96" alt="TrayTrim icon">
+  <img src="docs/hero.png" width="860" alt="TrayTrim: share your Sims, not your whole Mods folder. A household of 2.29 GB of CC packages exports as 42 MB.">
 </p>
 
 <h1 align="center">TrayTrim</h1>
@@ -10,11 +10,10 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/stixez/TrayTrim/releases/latest"><img src="https://img.shields.io/github/v/release/stixez/TrayTrim?label=download" alt="Latest release"></a>
+  <a href="https://github.com/stixez/TrayTrim/actions/workflows/tests.yml"><img src="https://github.com/stixez/TrayTrim/actions/workflows/tests.yml/badge.svg" alt="Tests"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/stixez/TrayTrim" alt="MIT license"></a>
   <a href="https://buymeacoffee.com/stixe"><img src="https://img.shields.io/badge/Buy%20Me%20a%20Coffee-FFDD00?logo=buymeacoffee&logoColor=black" alt="Buy Me a Coffee"></a>
-</p>
-
-<p align="center">
-  <img src="docs/screenshots/household-light.png" width="860" alt="TrayTrim showing a household, its export size and its CC">
 </p>
 
 ## Why
